@@ -140,6 +140,8 @@ SHAPES = (
     "SELECT LOWER(obs_collection) FROM ivoa.obscore WHERE obs_collection ILIKE 'ska%'",
     "SELECT ra FROM ska.continuum_sources ORDER BY ra OFFSET 100",
     "SELECT a FROM t UNION SELECT a FROM u",
+    "SELECT a.obs_id, b.obs_id FROM ivoa.obscore AS a JOIN ivoa.obscore AS b ON "
+    "DISTANCE(POINT('ICRS', a.s_ra, a.s_dec), POINT('ICRS', b.s_ra, b.s_dec)) < 1.0/3600.0",
 )
 
 
@@ -672,3 +674,120 @@ def test_the_hit_and_miss_split_is_exact_under_threads():
 
     assert ADQL_TRANSLATION_HITS._value.get() - hits == 4 * 500
     assert ADQL_TRANSLATION_MISSES._value.get() - misses == 2 * 10
+
+
+# ---------------------------------------------------------------------------
+# DISTANCE predicates lowered to indexable pgsphere containment.
+#
+# `DEGREES(p <-> q) < r` is a function of two columns and no index answers
+# it, so a catalogue cross-match written the way ADQL users write it plans
+# as a nested loop over two sequential scans. The lowering emits the
+# containment a GiST index on the point expression does serve, conjoined
+# with the original comparison so the rows are unchanged.
+# ---------------------------------------------------------------------------
+
+XMATCH = (
+    "SELECT a.obs_id FROM ivoa.obscore AS a JOIN ivoa.obscore AS b ON "
+    "DISTANCE(POINT('ICRS', a.s_ra, a.s_dec), POINT('ICRS', b.s_ra, b.s_dec)) {}"
+)
+
+
+def test_distance_lt_lowers_to_containment():
+    sql = adql_to_postgresql(XMATCH.format("< 1.0/3600.0"))
+    assert (
+        "spoint(RADIANS(a.s_ra), RADIANS(a.s_dec)) @ "
+        "scircle(spoint(RADIANS(b.s_ra), RADIANS(b.s_dec)), RADIANS(1.0/3600.0))"
+    ) in sql
+
+
+def test_lowered_radius_is_radians_while_distance_stays_degrees():
+    """DISTANCE is degrees; scircle's radius is radians. The conversion is
+    the whole correctness of the rewrite."""
+    sql = adql_to_postgresql(XMATCH.format("< 0.25"))
+    assert "scircle(spoint(RADIANS(b.s_ra), RADIANS(b.s_dec)), RADIANS(0.25))" in sql
+    assert "DEGREES(spoint(RADIANS(a.s_ra), RADIANS(a.s_dec)) <-> " in sql
+
+
+@pytest.mark.parametrize("op", ["<", "<="])
+def test_boundary_is_decided_by_the_original_comparison(op):
+    """pgsphere's `@` includes the boundary, so it is a superset of both
+    `< r` and `<= r` — a filter, not the answer. The original comparison is
+    kept as the second conjunct and decides `distance == r`, so `<` still
+    excludes that row and `<=` still includes it."""
+    sql = adql_to_postgresql(XMATCH.format(f"{op} 0.25"))
+    assert " @ scircle(" in sql
+    assert (
+        " AND DEGREES(spoint(RADIANS(a.s_ra), RADIANS(a.s_dec)) <-> "
+        f"spoint(RADIANS(b.s_ra), RADIANS(b.s_dec))) {op} 0.25)"
+    ) in sql
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.5",
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) <= 0.5",
+        "0.5 > DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20))",
+        "0.5 >= DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20))",
+        # the four-coordinate spelling of DISTANCE
+        "DISTANCE(s_ra, s_dec, 10, 20) < 0.5",
+        # POINT arguments as expressions, and the coordinate system omitted
+        "DISTANCE(POINT(s_ra + 0, s_dec), POINT(10, 20)) < 0.5",
+        # a constant-arithmetic bound, which is how an arcsecond is written
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 1.0/3600.0",
+    ],
+)
+def test_shapes_that_lower(predicate):
+    sql = adql_to_postgresql(f"SELECT obs_id FROM ivoa.obscore WHERE {predicate}")
+    assert " @ scircle(" in sql
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        # containment says nothing about being outside a circle
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) > 0.5",
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) >= 0.5",
+        "0.5 < DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20))",
+        "0.5 <= DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20))",
+        # an equality is not a range
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) = 0.5",
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) != 0.5",
+        # BETWEEN is an annulus, not a disc
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) BETWEEN 0.1 AND 0.5",
+        # not a bare DISTANCE: rescaling the bound is not this rewrite's job
+        "2*DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.5",
+        # a per-row bound can be negative, and scircle raises on a negative
+        # radius — the rewrite would turn rows into a query failure
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < sep_col",
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < -0.5",
+    ],
+)
+def test_shapes_that_are_left_alone(predicate):
+    sql = adql_to_postgresql(f"SELECT obs_id FROM ivoa.obscore WHERE {predicate}")
+    assert "scircle" not in sql
+    assert "<->" in sql
+
+
+def test_select_list_distance_still_computes_the_distance():
+    """Only the predicate is lowered. A DISTANCE in the SELECT list is a
+    value, and it keeps the emission it always had — including next to a
+    predicate that does lower."""
+    sql = adql_to_postgresql(
+        "SELECT DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) AS d "
+        "FROM ivoa.obscore "
+        "WHERE DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.5 "
+        "ORDER BY d"
+    )
+    select_list, _, where = sql.partition("WHERE")
+    assert "DEGREES(spoint(RADIANS(s_ra), RADIANS(s_dec)) <-> " in select_list
+    assert "scircle" not in select_list
+    assert " @ scircle(" in where
+
+
+def test_lowered_predicate_records_its_geometry_columns():
+    """The lowering builds the points itself, so the ADQL 2.1 column
+    references in them must still reach the caller's type check."""
+    assert translate("SELECT 1 FROM t WHERE DISTANCE(p1, p2) < 0.5").geometry_columns == frozenset(
+        {"p1", "p2"}
+    )

@@ -396,17 +396,95 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
-    def visitDistance(self, ctx):
-        arg = ('', '')
+    def _distance_points(self, ctx):
+        """The two pgsphere points of a DISTANCE call, in argument order."""
         if isinstance(ctx.children[2], ADQLParser.Coord_valueContext):
-            arg = (self._point_argument(ctx.children[2]),
-                   self._point_argument(ctx.children[4]))
-        else:
-            arg = (f"spoint(RADIANS({_convert_values(ctx, 2)[0]}), " +
-                          f"RADIANS({_convert_values(ctx, 4)[0]}))",
-                   f"spoint(RADIANS({_convert_values(ctx, 6)[0]}), " +
-                          f"RADIANS({_convert_values(ctx, 8)[0]}))")
+            return (self._point_argument(ctx.children[2]),
+                    self._point_argument(ctx.children[4]))
+        return (f"spoint(RADIANS({_convert_values(ctx, 2)[0]}), " +
+                       f"RADIANS({_convert_values(ctx, 4)[0]}))",
+                f"spoint(RADIANS({_convert_values(ctx, 6)[0]}), " +
+                       f"RADIANS({_convert_values(ctx, 8)[0]}))")
 
+    def visitComparison_predicate(self, ctx):
+        """Lower `DISTANCE(p, q) < r` to a predicate an index can serve.
+
+        `DEGREES(p <-> q) < r` is a function of two columns: no index
+        answers it, so a cross-match written the way ADQL users write it
+        (Gaia's own examples) plans as a nested loop over two sequential
+        scans. The same rows are `p @ scircle(q, RADIANS(r))`, which a GiST
+        index on the point expression does serve.
+
+        Lowered: `DISTANCE(p, q) < r`, `<= r`, and `r > DISTANCE(p, q)`,
+        `r >= DISTANCE(p, q)`, for either DISTANCE spelling (two points or
+        four coordinates) and any POINT arguments, when *r* is a constant
+        numeric expression that is not negative.
+
+        Left alone, deliberately: `>`, `>=`, `=`, `!=` and BETWEEN (a
+        containment says nothing about being *outside* a circle, and an
+        equality is not a range at all); anything but a bare DISTANCE on
+        one side (`2*DISTANCE(...) < r` is left as written rather than
+        rescaled); a bound that is not a constant (a per-row radius can be
+        negative, and `scircle` errors on a negative radius, which would
+        turn rows into a failure); and DISTANCE in the SELECT list, which
+        still has to compute the real distance.
+        """
+        lowered = self._lower_distance(ctx)
+        if lowered is None:
+            return self.visitChildren(ctx)
+        # Keep comp_op, the one child with a terminal of its own, as the
+        # token carrying the replacement -- the same trick the geometry
+        # rules play with their leading keyword.
+        comp_op = ctx.children[1]
+        ctx.children = [comp_op]
+        self.contexts[comp_op] = lowered
+        return None
+
+    def _lower_distance(self, ctx):
+        """The containment SQL for a comparison_predicate, or None.
+
+        None means "not a shape that lowers exactly"; the caller then
+        translates the comparison as it always did.
+        """
+        op = ctx.children[1].getText()
+        distance = _sole_distance(ctx.children[0])
+        if distance is not None:
+            bound_ctx = ctx.children[2]
+            if op not in ('<', '<='):
+                return None
+        else:
+            distance = _sole_distance(ctx.children[2])
+            bound_ctx = ctx.children[0]
+            if distance is None or op not in ('>', '>='):
+                return None
+            op = '<' if op == '>' else '<='
+
+        bound = bound_ctx.getText()
+        try:
+            if not _eval_number(bound) >= 0:
+                return None
+        except (ValueError, SyntaxError, TypeError, ZeroDivisionError):
+            return None
+
+        left, right = self._distance_points(distance)
+        # Two terms, and both are needed:
+        #
+        # - `@` is what the index serves, but it is pgsphere's containment,
+        #   so it includes the boundary (and with a floating-point epsilon
+        #   around it). It is therefore a *superset* of both `< r` and
+        #   `<= r` -- a filter, not the answer;
+        # - the original comparison, unchanged, decides. It runs only on
+        #   the rows the index already found, and it is exactly the
+        #   expression this query would have been given without the
+        #   lowering, so at `distance == r` the query keeps the rows it
+        #   had: `<` still excludes them, `<=` still includes them.
+        #
+        # DISTANCE is degrees; scircle's radius is radians, hence RADIANS.
+        return ('(%s @ scircle(%s, RADIANS(%s)) AND %s(%s <-> %s) %s %s)'
+                % (left, right, bound, self.conunits, left, right, op, bound))
+
+    def visitDistance(self, ctx):
+        arg = self._distance_points(ctx)
         ctx_text = '%s(%s <-> %s)' % ((self.conunits, ) + arg)
         derived_column = _get_ancestor_class_node(
             ctx, ADQLParser.Derived_columnContext, depth=9)
@@ -476,6 +554,21 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
             ctx_text = '%s && %s' % (left, right)
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
+
+
+def _sole_distance(ctx):
+    """The DISTANCE call a value expression consists of, if that is all it is.
+
+    Descends the single-child chain from value_expression down; anything
+    with a sibling (an operator, a sign, parentheses) stops the descent, so
+    only a comparison against a bare DISTANCE is ever lowered.
+    """
+    while not isinstance(ctx, ADQLParser.DistanceContext):
+        children = getattr(ctx, 'children', None)
+        if not children or len(children) != 1:
+            return None
+        ctx = children[0]
+    return ctx
 
 
 def _is_point(sql):
