@@ -412,8 +412,9 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         `DEGREES(p <-> q) < r` is a function of two columns: no index
         answers it, so a cross-match written the way ADQL users write it
         (Gaia's own examples) plans as a nested loop over two sequential
-        scans. The same rows are `p @ scircle(q, RADIANS(r))`, which a GiST
-        index on the point expression does serve.
+        scans. The same rows are `p @ scircle(q, RADIANS(r))` -- and its
+        mirror image, `q @ scircle(p, RADIANS(r))` -- which a GiST index on
+        the point expression does serve.
 
         Lowered: `DISTANCE(p, q) < r`, `<= r`, and `r > DISTANCE(p, q)`,
         `r >= DISTANCE(p, q)`, for either DISTANCE spelling (two points or
@@ -467,12 +468,25 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
             return None
 
         left, right = self._distance_points(distance)
-        # Two terms, and both are needed:
+        # Three terms, and all three earn their place:
         #
-        # - `@` is what the index serves, but it is pgsphere's containment,
-        #   so it includes the boundary (and with a floating-point epsilon
-        #   around it). It is therefore a *superset* of both `< r` and
-        #   `<= r` -- a filter, not the answer;
+        # - `x @ scircle(y, r)` is what the index serves, but `@` is
+        #   pgsphere's containment, so it includes the boundary (and with a
+        #   floating-point epsilon around it). It is a *superset* of both
+        #   `< r` and `<= r` -- a filter, not the answer;
+        # - the mirror image, `y @ scircle(x, r)`, is the same predicate
+        #   with the arguments swapped, and is redundant to a reader. It is
+        #   not redundant to the planner: only the *left* operand can be
+        #   matched against an index on the point expression, so one
+        #   spelling reaches the catalogue's index and the other cannot.
+        #   Which one the user writes is arbitrary -- and measured on the
+        #   500k-row ivoa.obscore against a 1,000-row uploaded position
+        #   list, the unlucky order is 151 s (a sequential scan of the
+        #   catalogue per probe) where the lucky one is 16 ms. Emitting both
+        #   leaves the choice to the planner and costs nothing: the same
+        #   measurement with both terms present is also 16 ms. Each is a
+        #   superset of the true predicate, so their conjunction still
+        #   contains every row the query must return;
         # - the original comparison, unchanged, decides. It runs only on
         #   the rows the index already found, and it is exactly the
         #   expression this query would have been given without the
@@ -480,8 +494,11 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         #   had: `<` still excludes them, `<=` still includes them.
         #
         # DISTANCE is degrees; scircle's radius is radians, hence RADIANS.
-        return ('(%s @ scircle(%s, RADIANS(%s)) AND %s(%s <-> %s) %s %s)'
-                % (left, right, bound, self.conunits, left, right, op, bound))
+        return ('(%s @ scircle(%s, RADIANS(%s))'
+                ' AND %s @ scircle(%s, RADIANS(%s))'
+                ' AND %s(%s <-> %s) %s %s)'
+                % (left, right, bound, right, left, bound,
+                   self.conunits, left, right, op, bound))
 
     def visitDistance(self, ctx):
         arg = self._distance_points(ctx)

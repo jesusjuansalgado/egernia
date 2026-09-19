@@ -700,6 +700,23 @@ def test_distance_lt_lowers_to_containment():
     ) in sql
 
 
+def test_both_argument_orders_of_the_containment_are_emitted():
+    """Only the *left* operand of `@` can be matched against an index on the
+    point expression, so `p @ scircle(q, r)` reaches p's index and not q's.
+    Which way round the user writes DISTANCE is arbitrary, and on the 500k
+    ivoa.obscore the unlucky order measured 151 s against 16 ms for the
+    lucky one. Both are emitted so the planner picks; each is a superset of
+    the true predicate, so the conjunction still contains every matching
+    row."""
+    sql = adql_to_postgresql(XMATCH.format("< 1.0/3600.0"))
+    assert (
+        "spoint(RADIANS(a.s_ra), RADIANS(a.s_dec)) @ "
+        "scircle(spoint(RADIANS(b.s_ra), RADIANS(b.s_dec)), RADIANS(1.0/3600.0)) AND "
+        "spoint(RADIANS(b.s_ra), RADIANS(b.s_dec)) @ "
+        "scircle(spoint(RADIANS(a.s_ra), RADIANS(a.s_dec)), RADIANS(1.0/3600.0))"
+    ) in sql
+
+
 def test_lowered_radius_is_radians_while_distance_stays_degrees():
     """DISTANCE is degrees; scircle's radius is radians. The conversion is
     the whole correctness of the rewrite."""
