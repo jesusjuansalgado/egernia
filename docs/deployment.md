@@ -7,8 +7,9 @@ docker compose up --build -d
 ./scripts/smoke_test.sh
 ```
 
-Compose builds three images: `db` (PostgreSQL 18 + pg_sphere, initialized
-from `db/init/*.sql`), `tap-api` and `tap-executor` (both installed with
+Compose builds three images: `db` (PostgreSQL 18 + pg_sphere, and skycell
+when `SKYCELL_REF` is set — see [Geometry backend](#geometry-backend-pg_sphere-or-skycell);
+initialized from `db/init/*.sql`), `tap-api` and `tap-executor` (both installed with
 `uv sync --frozen` from the committed `uv.lock`).
 
 ## Helm (Kubernetes)
@@ -465,6 +466,52 @@ misconfiguration.
     `pg_dump --format=custom` archive beforehand and `pg_restore` it into the
     new cluster.
 
+## Geometry backend: pg_sphere or skycell
+
+ADQL geometry (`POINT`, `CIRCLE`, `CONTAINS`, `DISTANCE`, …) is translated to
+SQL for one PostgreSQL extension, chosen by `TAP_GEOMETRY_BACKEND`:
+
+- **`pgsphere`** (the default): pg_sphere's `spoint`/`scircle`/`spoly` and
+  its operators, with GiST indexes.
+- **`skycell`**: [skycell](https://github.com/jesusjuansalgado/skycell), whose
+  functions carry ADQL's own names. Positions are indexed by a B-tree on their
+  HEALPix cell (`skycell_ang2cell(s_ra, s_dec)`), and skycell plans every
+  ADQL spelling of a cone or a cross-match through it: `CONTAINS(POINT,
+  CIRCLE)` with the point or the circle on either side, and `DISTANCE(…) < r`.
+  Footprints are stored as skycell `skyregion` values with a GiST index.
+
+The choice reaches further than the translation. The `s_region_geom`
+footprint column is a pg_sphere `spoly` or a skycell `skyregion`, and the
+cone-search index on `(s_ra, s_dec)` is a GiST on `spoint(…)` or the skycell
+cell B-tree. So the database needs the chosen extension installed before
+the services start, and switching backends on a deployment that has ingested
+metadata means rebuilding the generated tables. `ivoa.obscore` rebuilds
+itself when its index definitions change.
+
+The `db` image installs pg_sphere always and skycell when built with a
+skycell branch or tag:
+
+```bash
+SKYCELL_REF=main TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
+```
+
+With Helm, set `config.geometryBackend: skycell` and use a tap-db image built
+with `SKYCELL_REF`.
+
+What differs under skycell:
+
+- An ADQL `BOX` means the same coordinate range as under pg_sphere. Its Dec
+  edges are great circles rather than lines of constant Dec, so the two
+  backends can disagree for points within a couple of arcseconds of those
+  edges.
+- skycell's polygons must be convex. A non-convex `s_region` POLYGON is
+  stored with a NULL `s_region_geom` (and a warning in the log) rather than
+  refused, so the document still ingests but that footprint answers no
+  geometry query. A CIRCLE footprint is stored as the exact circle rather than
+  a 32-gon, and a POSITION as a circle of 50 milliarcseconds.
+- `COORD1`, `COORD2` and `CENTROID` work, and the capabilities document lists
+  them.
+
 ## Pre-deploy schema bootstrap
 
 By default every service replica ensures the database schema at startup —
@@ -502,6 +549,7 @@ All services read environment variables (see `egernia_core/config.py`):
 | `TAP_DEFAULT_MAXREC` / `TAP_HARD_MAXREC` | `10000` / `1000000` | Row limits |
 | `TAP_SYNC_TIMEOUT` | `30` | Sync query timeout (s) |
 | `TAP_SYNC_MAX_BYTES` | `67108864` | Maximum serialized synchronous result size; use async for larger results |
+| `TAP_GEOMETRY_BACKEND` | `pgsphere` | Which extension ADQL geometry is translated for: `pgsphere` or `skycell`. See [Geometry backend](#geometry-backend-pg_sphere-or-skycell) |
 | `TAP_TRANSLATION_CACHE_SIZE` | `512` | Entries in the per-worker ADQL translation memo; `0` disables it. Read once at start-up. Its hit rate is `tap_adql_translation_cache_hits_total` over the sum of hits and misses |
 | `TAP_ASYNC_EXEC_DURATION` | `600` | Default async `executionDuration` (s) |
 | `TAP_JOB_RETENTION` | `604800` | Default job lifetime before destruction (s) |

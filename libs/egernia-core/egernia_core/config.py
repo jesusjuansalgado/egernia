@@ -52,6 +52,32 @@ def _bool(name: str, default: bool):
     return field(default_factory=lambda: _flag(name, default))
 
 
+def _choose(name: str, default: str, choices: tuple[str, ...]) -> str:
+    """Read an environment variable that must be one of ``choices``.
+
+    Unset or empty means the default; anything else outside ``choices`` is
+    an error at startup, for the same reason as ``_flag``.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value not in choices:
+        raise ValueError(f"{name}={raw!r} is not one of {', '.join(choices)}")
+    return value
+
+
+def _choice(name: str, default: str, choices: tuple[str, ...]):
+    return field(default_factory=lambda: _choose(name, default, choices))
+
+
+#: The PostgreSQL extensions ADQL geometry can be translated for: pg_sphere
+#: (``spoint``/``scircle``/``@``) or skycell (ADQL's own function names on
+#: ``skypos``/``skyregion``, indexed by a HEALPix cell B-tree). See
+#: query/_adql/skycell.py.
+GEOMETRY_BACKENDS = ("pgsphere", "skycell")
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = _env("TAP_DATABASE_URL", "postgresql://tap:tap@localhost:5432/tap")
@@ -96,6 +122,12 @@ class Settings:
     # which is the way back out and the way to measure the cache on one host.
     # Memory sizing per worker: docs/python-performance.md.
     translation_cache_size: int = _int("TAP_TRANSLATION_CACHE_SIZE", "512")
+    # Which extension ADQL geometry is translated for, and which one the
+    # footprint companion columns and the position index are built with
+    # (GEOMETRY_BACKENDS). The database must have that extension installed.
+    # Changing it on a deployment with ingested metadata needs the generated
+    # tables rebuilt: their s_region_geom column is typed by the backend.
+    geometry_backend: str = _choice("TAP_GEOMETRY_BACKEND", "pgsphere", GEOMETRY_BACKENDS)
     default_exec_duration_s: int = _int("TAP_ASYNC_EXEC_DURATION", "600")
     job_retention_s: int = _int("TAP_JOB_RETENTION", str(7 * 24 * 3600))
     upload_max_rows: int = _int("TAP_UPLOAD_MAX_ROWS", "100000")

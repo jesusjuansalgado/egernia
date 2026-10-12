@@ -9,3 +9,15 @@ BEGIN
     END;
 END
 $do$;
+
+-- skycell, the alternative geometry backend (TAP_GEOMETRY_BACKEND=skycell);
+-- only present when the image was built with it (db/Dockerfile, SKYCELL_REF).
+DO $do$
+BEGIN
+    BEGIN
+        CREATE EXTENSION IF NOT EXISTS skycell;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'skycell not available: TAP_GEOMETRY_BACKEND=skycell will fail (%).', SQLERRM;
+    END;
+END
+$do$;

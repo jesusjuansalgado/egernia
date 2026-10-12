@@ -28,20 +28,29 @@ from .schema_gen import TableSpec, ddl_statements, registration_statements
 
 # How a derived column's value is computed from its source column's value,
 # by SQL type (see ColumnSpec.derived_from in schema_gen). A conversion
-# error is the caller's mistake, so it surfaces as UsageError.
-DERIVATIONS = {"spoly": regions.stcs_to_spoly}
+# error is the caller's mistake, so it surfaces as UsageError -- except a
+# valid region the geometry backend cannot represent (a non-convex polygon
+# under skycell), which is stored as NULL so the document still ingests.
+DERIVATIONS = {
+    "spoly": regions.stcs_to_spoly,
+    "skyregion": regions.stcs_to_skyregion,
+}
 DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 1000
+
+
+log = logging.getLogger("egernia_core")
 
 
 def _derive(col, source_value):
     try:
         return DERIVATIONS[col.sql_type](source_value)
+    except regions.UnsupportedRegion as exc:
+        log.warning("%s left NULL: %s", col.name, exc)
+        return None
     except ValueError as exc:
         raise UsageError(str(exc)) from None
 
-
-log = logging.getLogger("egernia_core")
 
 ADVISORY_LOCK_KEY = 7_412_001  # arbitrary, service-wide
 

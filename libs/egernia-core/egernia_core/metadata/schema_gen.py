@@ -34,6 +34,8 @@ import annotated_types
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
+from ..config import settings
+
 SQL_TYPES = {
     str: "text",
     int: "bigint",
@@ -44,6 +46,7 @@ SQL_TYPES = {
 TAP_DATATYPES = {
     "text": ("char", "*"),
     "spoly": ("char", "*"),
+    "skyregion": ("char", "*"),
     "bigint": ("long", None),
     "double precision": ("double", None),
     "boolean": ("boolean", None),
@@ -235,19 +238,22 @@ def _scalar_column(
 
 
 # The footprint column the data models carry as STC-S text. Text is not
-# queryable: each such column gets a derived pgsphere companion so ADQL
-# INTERSECTS/CONTAINS work over the ingested metadata.
+# queryable: each such column gets a derived geometry companion so ADQL
+# INTERSECTS/CONTAINS work over the ingested metadata -- a pgsphere spoly,
+# or a skycell skyregion under the skycell geometry backend.
 REGION_SOURCE = "s_region"
 REGION_SUFFIX = "_geom"
+REGION_TYPES = {"pgsphere": "spoly", "skycell": "skyregion"}
 
 
 def _region_companion(source: ColumnSpec) -> ColumnSpec:
+    backend = settings.geometry_backend
     return ColumnSpec(
         name=f"{source.name}{REGION_SUFFIX}",
-        sql_type="spoly",
+        sql_type=REGION_TYPES[backend],
         nullable=True,
         description=(
-            "pgsphere footprint derived from "
+            f"{backend} footprint derived from "
             f"{source.name} at ingestion; query it with INTERSECTS/CONTAINS"
         ),
         derived_from=source.name,
@@ -400,17 +406,11 @@ def ddl_statements(tables: list[TableSpec], query_role: str) -> list[str]:
             for col in table.columns
             if col.index
         )
-        # Cone searches translate to `spoint(RADIANS(s_ra), RADIANS(s_dec))
-        # @ scircle(...)`, and only an index on that *expression* is ever
-        # considered — a GiST index on a stored point column would not be.
-        # Any generated table carrying the ObsCore position pair gets it.
+        # Any generated table carrying the ObsCore position pair gets the
+        # index cone searches use (position_index_statements).
         names = {c.name for c in table.columns}
         if {"s_ra", "s_dec"} <= names:
-            statements.append(
-                f"CREATE INDEX IF NOT EXISTS {table.name}_spoint_gist"
-                f" ON {table.qualified}"
-                " USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))"
-            )
+            statements.extend(position_index_statements(table.name, table.qualified))
         # The hierarchy's key chain is perfectly correlated (a child key
         # determines every parent key), which per-column statistics cannot
         # see. What these declare is single-table: `dependencies` sharpens a
@@ -438,6 +438,33 @@ def ddl_statements(tables: list[TableSpec], query_role: str) -> list[str]:
     statements.append(f"GRANT USAGE ON SCHEMA {schema} TO {query_role}")
     statements.append(f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {query_role}")
     return statements
+
+
+def position_index_statements(name: str, qualified: str) -> list[str]:
+    """The index a cone search over (s_ra, s_dec) is answered from.
+
+    Under pgsphere, cone searches translate to ``spoint(RADIANS(s_ra),
+    RADIANS(s_dec)) @ scircle(...)``, and only an index on that *expression*
+    is ever considered — a GiST index on a stored point column would not be.
+    Under skycell, the index is a B-tree on the position's HEALPix cell,
+    ``skycell_ang2cell(s_ra, s_dec)``, which skycell plans every ADQL spelling
+    of a cone or a cross-match through; its histogram is the density map
+    skycell's coverings are costed from, so it gets a finer statistics target
+    than PostgreSQL's default.
+    """
+    if settings.geometry_backend == "skycell":
+        # an index lives in its table's schema
+        schema = qualified.rsplit(".", 1)[0] + "." if "." in qualified else ""
+        return [
+            f"CREATE INDEX IF NOT EXISTS {name}_skycell_cell"
+            f" ON {qualified} (skycell_ang2cell(s_ra, s_dec))",
+            f"ALTER INDEX {schema}{name}_skycell_cell ALTER COLUMN 1 SET STATISTICS 1000",
+        ]
+    return [
+        f"CREATE INDEX IF NOT EXISTS {name}_spoint_gist"
+        f" ON {qualified}"
+        " USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))"
+    ]
 
 
 def _tap_datatype(sql_type: str) -> tuple[str, str | None]:

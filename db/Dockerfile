@@ -11,6 +11,23 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-18-pgsphere \
     && rm -rf /var/lib/apt/lists/*
 
+# skycell (https://github.com/jesusjuansalgado/skycell), the alternative
+# geometry backend (TAP_GEOMETRY_BACKEND=skycell), built from source when
+# SKYCELL_REF names a branch or tag of SKYCELL_REPO. Left out by default; the
+# toolchain is removed again so the image only gains the extension itself.
+ARG SKYCELL_REPO=https://github.com/jesusjuansalgado/skycell
+ARG SKYCELL_REF=
+RUN if [ -n "$SKYCELL_REF" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+            build-essential ca-certificates git postgresql-server-dev-18 \
+        && git clone --depth 1 --branch "$SKYCELL_REF" "$SKYCELL_REPO" /tmp/skycell \
+        && make -C /tmp/skycell/ext with_llvm=no install \
+        && rm -rf /tmp/skycell \
+        && apt-get purge -y --auto-remove build-essential git postgresql-server-dev-18 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # postgres:18 keeps its data under /var/lib/postgresql/<major>/docker and no
 # longer ships /var/lib/postgresql/data. Compose and the Helm chart both put
 # PGDATA at /var/lib/postgresql/data/pgdata, so create that mount point with

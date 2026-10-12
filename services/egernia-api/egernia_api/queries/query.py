@@ -67,7 +67,8 @@ def prepare_query(params: dict[str, str]) -> dict:
 
     # Geometry slots accept any bare identifier during translation, which is
     # pure and consults no schema. A text column reaching PostgreSQL there
-    # fails as `operator does not exist: text && scircle` — a server-fault
+    # fails as `operator does not exist: text && scircle` (or, under skycell,
+    # `function intersects(text, skyregion) does not exist`) — a server-fault
     # shape for a usage error, naming neither the column at fault nor the one
     # to use. Refused here instead, where the column metadata already is.
     _reject_text_geometry(translation.geometry_columns, tables, upload_names)
@@ -162,11 +163,14 @@ def _published_tables(*, refresh: bool = False) -> frozenset[str]:
         return tables
 
 
-# pgsphere's spatial types. A column is queryable with INTERSECTS/CONTAINS
-# exactly when PostgreSQL holds it as one of these; TAP_SCHEMA cannot answer
-# this, because its VOTable datatype for spoly is "char" — the same as the
-# STC-S text the footprint was derived from.
-_GEOMETRY_TYPES = frozenset({"spoly", "spoint", "scircle", "sbox", "spath", "sline"})
+# The spatial types of pgsphere and of skycell. A column is queryable with
+# INTERSECTS/CONTAINS exactly when PostgreSQL holds it as one of these;
+# TAP_SCHEMA cannot answer this, because its VOTable datatype for spoly or
+# skyregion is "char" — the same as the STC-S text the footprint was derived
+# from.
+_GEOMETRY_TYPES = frozenset(
+    {"spoly", "spoint", "scircle", "sbox", "spath", "sline", "skypos", "skyregion"}
+)
 
 
 @functools.cache
@@ -231,7 +235,7 @@ def _reject_text_geometry(
             # one column and absent under the other. Answering a different
             # query than the one asked would drop those rows silently.
             message += (
-                f". Use {alternative}, the pgsphere footprint derived from it at"
+                f". Use {alternative}, the footprint geometry derived from it at"
                 f" ingestion — note it is NULL wherever {bare} could not be converted"
             )
         raise UsageError(message)

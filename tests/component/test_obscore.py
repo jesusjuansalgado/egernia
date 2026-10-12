@@ -366,6 +366,7 @@ def test_a_deployment_still_serving_the_view_is_migrated_to_the_table(tap_servic
     name with every row the view had, without anything but the bootstrap
     running — and leave the triggers behind so the next write is followed."""
     import psycopg
+    from egernia_api.plugins.obscore import POSITION_INDEX
     from egernia_core import bootstrap
     from egernia_core.metadata.plugins import active_plugins
 
@@ -392,7 +393,8 @@ def test_a_deployment_still_serving_the_view_is_migrated_to_the_table(tap_servic
                 " AND tablename = 'obscore'"
             )
         }
-        assert {"obscore_did_key", "obscore_did_trgm", "obscore_spoint_gist"} <= indexes
+        # the position index is the geometry backend's (TAP_GEOMETRY_BACKEND)
+        assert {"obscore_did_key", "obscore_did_trgm", POSITION_INDEX} <= indexes
         triggers = {
             row[0]
             for row in conn.execute(

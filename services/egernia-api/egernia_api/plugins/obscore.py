@@ -19,8 +19,9 @@ do, and rebuilt when its definition changes (see ``ensure_obscore``).
 Column metadata is transcribed from REC-ObsCore-v1.1-20170509 Table 6 (the
 TAP_SCHEMA values for the mandatory fields); utypes carry the ``obscore:``
 prefix the table's caption says it omits. One non-standard column rides
-along: ``s_region_geom``, the pgsphere footprint the ingest pipeline
-derives from ``s_region``, registered with ``std = 0`` so ADQL
+along: ``s_region_geom``, the footprint the ingest pipeline derives from
+``s_region`` (a pgsphere or skycell geometry, by geometry backend),
+registered with ``std = 0`` so ADQL
 ``INTERSECTS``/``CONTAINS`` work on the table too.
 
 Mapping decisions (each visible in the SQL below):
@@ -345,7 +346,8 @@ OBSCORE_COLUMNS: list[ObsCoreColumn] = [
         "Name of the instrument used for this observation",
         "o.instrument_name",
     ),
-    # Non-standard companion: the pgsphere footprint derived from s_region.
+    # Non-standard companion: the footprint derived from s_region, a pgsphere
+    # spoly or a skycell skyregion by geometry backend.
     # std = 0 says it plainly; it exists so INTERSECTS/CONTAINS work directly
     # on the view.
     ObsCoreColumn(
@@ -353,7 +355,8 @@ OBSCORE_COLUMNS: list[ObsCoreColumn] = [
         "char",
         "pos.outline;obs.field",
         None,
-        "pgsphere footprint derived from s_region at ingestion (non-standard);"
+        f"{settings.geometry_backend} footprint derived from s_region at ingestion"
+        " (non-standard);"
         " query it with INTERSECTS/CONTAINS",
         "p.s_region_geom",
         principal=0,
@@ -517,13 +520,29 @@ def select_sql(products: str = "srcnet.data_products") -> str:
     )
 
 
+# The index a cone search over (s_ra, s_dec) is answered from, by geometry
+# backend. Under pgsphere, ``spoint(RADIANS(s_ra), RADIANS(s_dec))`` is the
+# exact expression a cone search becomes, and only an index on that
+# expression is considered. Under skycell it is a B-tree on the position's
+# HEALPix cell, which skycell plans every ADQL spelling of a cone or a
+# cross-match through.
+POSITION_INDEXES: dict[str, tuple[str, str]] = {
+    "pgsphere": (
+        "obscore_spoint_gist",
+        "INDEX {name} ON {table} USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))",
+    ),
+    "skycell": (
+        "obscore_skycell_cell",
+        "INDEX {name} ON {table} (skycell_ang2cell(s_ra, s_dec))",
+    ),
+}
+POSITION_INDEX = POSITION_INDEXES[settings.geometry_backend][0]
+
 # Indexes on the relation, by name. The DID is the unique key (the upsert
 # target) and gets a trigram index too, so equality, a prefix and a component
 # in the middle (``LIKE '%<project>/%'``) are all index scans; the rest are
-# the ObsCore filter columns any client narrows by, and the two GiST indexes
-# the ADQL geometry functions translate to (``spoint(RADIANS(s_ra),
-# RADIANS(s_dec))`` is the exact expression a cone search becomes, and only an
-# index on that expression is considered).
+# the ObsCore filter columns any client narrows by, the position index above,
+# and the GiST index on the footprint.
 INDEXES: dict[str, str] = {
     "obscore_did_key": "UNIQUE INDEX {name} ON {table} (obs_publisher_did)",
     "obscore_did_trgm": "INDEX {name} ON {table} USING gin (obs_publisher_did gin_trgm_ops)",
@@ -532,9 +551,7 @@ INDEXES: dict[str, str] = {
     "obscore_calib_idx": "INDEX {name} ON {table} (calib_level)",
     "obscore_time_idx": "INDEX {name} ON {table} (t_min, t_max)",
     "obscore_target_idx": "INDEX {name} ON {table} (target_name)",
-    "obscore_spoint_gist": (
-        "INDEX {name} ON {table} USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))"
-    ),
+    POSITION_INDEX: POSITION_INDEXES[settings.geometry_backend][1],
     "obscore_s_region_geom_gist": "INDEX {name} ON {table} USING gist (s_region_geom)",
 }
 # needs pg_trgm, which a role that cannot CREATE EXTENSION may not have
@@ -692,6 +709,11 @@ def _create_index(conn, name: str, table: str = TABLE, suffix: str = "") -> None
     role that cannot loses the index, not the bootstrap)."""
     if name != TRGM_INDEX:
         conn.execute(index_sql(name, table, suffix))
+        if name == "obscore_skycell_cell":
+            # skycell costs its coverings from this histogram: a finer one
+            # than PostgreSQL's default resolves a crowded sky
+            schema = table.split(".")[0]
+            conn.execute(f"ALTER INDEX {schema}.{name}{suffix} ALTER COLUMN 1 SET STATISTICS 1000")
         return
     conn.execute("SAVEPOINT obscore_trgm")
     try:

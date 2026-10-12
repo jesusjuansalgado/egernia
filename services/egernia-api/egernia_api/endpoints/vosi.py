@@ -52,16 +52,29 @@ def _data_model_elements() -> str:
     return f'    <dataModel ivo-id="{ivoid}">ObsCore-1.1</dataModel>\n'
 
 
+# The extension ADQL geometry is translated for, by geometry backend.
+_GEOMETRY_EXTENSIONS = {"pgsphere": "pg_sphere", "skycell": "skycell"}
+
+
+def _geometry_extension() -> str:
+    return _GEOMETRY_EXTENSIONS[settings.geometry_backend]
+
+
 # The ADQL 2.1 optional features this service implements, grouped by the
 # TAPRegExt feature-type ivo-id under which the REC defines them. Only what
 # the parser accepts AND the translation makes work in PostgreSQL is listed:
 # IN_UNIT and WITH are absent because they are refused, and CENTROID/REGION/
 # COORD1/COORD2/COORDSYS are absent because pgsphere translations for them
-# do not exist. The parser itself is the vendored ADQL 2.1 fork in
-# egernia_core.query._adql.
+# do not exist (under the skycell geometry backend COORD1, COORD2 and
+# CENTROID pass through to skycell's own functions, so they are listed for
+# it: _SKYCELL_GEO_FEATURES). The parser itself is the vendored ADQL 2.1 fork
+# in egernia_core.query._adql.
+_GEO_FEATURES = "ivo://ivoa.net/std/TAPRegExt#features-adqlgeo"
+_SKYCELL_GEO_FEATURES = ("CENTROID", "COORD1", "COORD2")
+
 _ADQL_FEATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "ivo://ivoa.net/std/TAPRegExt#features-adqlgeo",
+        _GEO_FEATURES,
         ("AREA", "BOX", "CIRCLE", "CONTAINS", "DISTANCE", "INTERSECTS", "POINT", "POLYGON"),
     ),
     ("ivo://ivoa.net/std/TAPRegExt#features-adql-string", ("LOWER", "UPPER", "ILIKE")),
@@ -76,6 +89,8 @@ def _adql_language_features() -> str:
     """The <languageFeatures> elements, indented six spaces."""
     blocks = []
     for type_id, forms in _ADQL_FEATURES:
+        if type_id == _GEO_FEATURES and settings.geometry_backend == "skycell":
+            forms = tuple(sorted(forms + _SKYCELL_GEO_FEATURES))
         features = "".join(f"        <feature><form>{form}</form></feature>\n" for form in forms)
         blocks.append(
             f'      <languageFeatures type="{type_id}">\n{features}      </languageFeatures>\n'
@@ -94,7 +109,7 @@ def _capability_elements() -> str:
       <name>ADQL</name>
       <version ivo-id="ivo://ivoa.net/std/ADQL#v2.0">2.0</version>
       <version ivo-id="ivo://ivoa.net/std/ADQL#v2.1">2.1</version>
-      <description>ADQL translated to PostgreSQL/pg_sphere</description>
+      <description>ADQL translated to PostgreSQL/{_geometry_extension()}</description>
 {_adql_language_features()}    </language>
     <outputFormat><mime>application/x-votable+xml</mime><alias>votable</alias></outputFormat>
     <outputFormat><mime>text/csv</mime><alias>csv</alias></outputFormat>

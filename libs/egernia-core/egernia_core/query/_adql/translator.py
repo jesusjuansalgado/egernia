@@ -667,21 +667,34 @@ class ADQLQueryTranslator(object):
         self.walker.walk(format_listener, self.tree)
         return format_listener.format_query()
 
-    def to_postgresql(self):
+    def to_postgresql(self, backend='pgsphere'):
         """
-        Translate ADQL query to a PostgreSQL query using pg_sphere plugin
-        for the spherical functions.
+        Translate ADQL query to a PostgreSQL query, with the spherical
+        functions of the pg_sphere extension (``backend='pgsphere'``) or of
+        skycell (``backend='skycell'``, see skycell.py).
 
         """
         if self._query is None:
             raise QueryError('No query given.')
 
+        if backend == 'pgsphere':
+            geometry_cls = ADQLGeometryTranslationVisitor
+            functions_cls = ADQLFunctionsTranslationVisitor
+        elif backend == 'skycell':
+            from .skycell import (
+                SkycellFunctionsTranslationVisitor,
+                SkycellGeometryTranslationVisitor,
+            )
+            geometry_cls = SkycellGeometryTranslationVisitor
+            functions_cls = SkycellFunctionsTranslationVisitor
+        else:
+            raise QueryError('unknown geometry backend: %s' % backend)
+
         self.parse()
 
-        geometry_visitor = ADQLGeometryTranslationVisitor()
+        geometry_visitor = geometry_cls()
         geometry_visitor.visit(self.tree)
-        translator_visitor = \
-            ADQLFunctionsTranslationVisitor(geometry_visitor.contexts)
+        translator_visitor = functions_cls(geometry_visitor.contexts)
         translator_visitor.visit(self.tree)
         self.geometry_columns = frozenset(
             geometry_visitor.geometry_columns |
