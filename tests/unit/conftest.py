@@ -732,8 +732,15 @@ def stub_iam(monkeypatch, iam_keypair):
 
         return _Response()
 
+    class _Opener:
+        def open(self, request, *args, **kwargs):
+            return patched_urlopen(request, *args, **kwargs)
+
     monkeypatch.setattr(httpx, "get", patched_get)
     monkeypatch.setattr(urllib.request, "urlopen", patched_urlopen)
+    # PyJWKClient fetches the JWKS through its own opener since PyJWT 2.14
+    # (redirects refused), not through urlopen.
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: _Opener())
 
     from egernia_core.auth import reset_verifier
 
