@@ -599,6 +599,15 @@ class FormatListener(ADQLParserListener):
         return '%s;' % query.rstrip()
 
 
+# The geometry and function visitors for each TAP_GEOMETRY_BACKEND. skycell.py
+# adds its own entry when the package is imported, so this module never
+# imports it (it builds on the visitors here).
+GEOMETRY_BACKENDS = {
+    'pgsphere': (ADQLGeometryTranslationVisitor,
+                 ADQLFunctionsTranslationVisitor),
+}
+
+
 class ADQLQueryTranslator(object):
     """
     The main translator object used to do the actual translation.
@@ -677,18 +686,10 @@ class ADQLQueryTranslator(object):
         if self._query is None:
             raise QueryError('No query given.')
 
-        if backend == 'pgsphere':
-            geometry_cls = ADQLGeometryTranslationVisitor
-            functions_cls = ADQLFunctionsTranslationVisitor
-        elif backend == 'skycell':
-            from .skycell import (
-                SkycellFunctionsTranslationVisitor,
-                SkycellGeometryTranslationVisitor,
-            )
-            geometry_cls = SkycellGeometryTranslationVisitor
-            functions_cls = SkycellFunctionsTranslationVisitor
-        else:
-            raise QueryError('unknown geometry backend: %s' % backend)
+        try:
+            geometry_cls, functions_cls = GEOMETRY_BACKENDS[backend]
+        except KeyError:
+            raise QueryError('unknown geometry backend: %s' % backend) from None
 
         self.parse()
 

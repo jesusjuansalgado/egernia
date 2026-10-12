@@ -243,8 +243,10 @@ def test_footprint_companion_is_a_skyregion_with_a_gist_index():
 
 def test_position_index_is_the_skycell_cell_btree(skycell):
     assert position_index_statements("data_products", "srcnet.data_products") == [
-        "CREATE INDEX IF NOT EXISTS data_products_skycell_cell"
-        " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec))",
+        (
+            "CREATE INDEX IF NOT EXISTS data_products_skycell_cell"
+            " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec))"
+        ),
         "ALTER INDEX srcnet.data_products_skycell_cell ALTER COLUMN 1 SET STATISTICS 1000",
     ]
     ddl = ddl_statements(list(_skycell_tables().values()), "tap_reader")

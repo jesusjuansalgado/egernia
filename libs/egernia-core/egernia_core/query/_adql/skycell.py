@@ -38,6 +38,7 @@ from queryparser.exceptions import QueryError
 
 from .ADQLParser import ADQLParser
 from .translator import (
+    GEOMETRY_BACKENDS,
     ADQLFunctionsTranslationVisitor,
     ADQLGeometryTranslationVisitor,
     _convert_values,
@@ -207,3 +208,9 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
         for _ in range(ctx.getChildCount() - 1):
             ctx.removeLastChild()
         self.contexts[ctx] = ctx_text
+
+
+GEOMETRY_BACKENDS["skycell"] = (
+    SkycellGeometryTranslationVisitor,
+    SkycellFunctionsTranslationVisitor,
+)
