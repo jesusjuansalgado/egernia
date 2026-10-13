@@ -63,20 +63,21 @@ def _geometry_extension() -> str:
 # The ADQL 2.1 optional features this service implements, grouped by the
 # TAPRegExt feature-type ivo-id under which the REC defines them. Only what
 # the parser accepts AND the translation makes work in PostgreSQL is listed:
-# IN_UNIT and WITH are absent because they are refused, and CENTROID/REGION/
-# COORD1/COORD2/COORDSYS are absent because pgsphere translations for them
-# do not exist (under the skycell geometry backend COORD1, COORD2 and
-# CENTROID pass through to skycell's own functions, so they are listed for
-# it: _SKYCELL_GEO_FEATURES). The parser itself is the vendored ADQL 2.1 fork
-# in egernia_core.query._adql.
+# IN_UNIT and WITH are absent because they are refused. The geometry
+# functions depend on the geometry backend: CENTROID/REGION/COORD1/COORD2/
+# COORDSYS have no pgsphere translations, while under skycell COORD1, COORD2
+# and CENTROID pass through to skycell's own functions. The parser itself is
+# the vendored ADQL 2.1 fork in egernia_core.query._adql.
 _GEO_FEATURES = "ivo://ivoa.net/std/TAPRegExt#features-adqlgeo"
-_SKYCELL_GEO_FEATURES = ("CENTROID", "COORD1", "COORD2")
+_PGSPHERE_GEO_FORMS = (
+    "AREA", "BOX", "CIRCLE", "CONTAINS", "DISTANCE", "INTERSECTS", "POINT", "POLYGON",
+)  # fmt: skip
+_GEO_FORMS = {
+    "pgsphere": _PGSPHERE_GEO_FORMS,
+    "skycell": tuple(sorted((*_PGSPHERE_GEO_FORMS, "CENTROID", "COORD1", "COORD2"))),
+}
 
-_ADQL_FEATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        _GEO_FEATURES,
-        ("AREA", "BOX", "CIRCLE", "CONTAINS", "DISTANCE", "INTERSECTS", "POINT", "POLYGON"),
-    ),
+_OTHER_ADQL_FEATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ivo://ivoa.net/std/TAPRegExt#features-adql-string", ("LOWER", "UPPER", "ILIKE")),
     ("ivo://ivoa.net/std/TAPRegExt#features-adql-offset", ("OFFSET",)),
     ("ivo://ivoa.net/std/TAPRegExt#features-adql-type", ("CAST",)),
@@ -88,9 +89,10 @@ _ADQL_FEATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
 def _adql_language_features() -> str:
     """The <languageFeatures> elements, indented six spaces."""
     blocks = []
-    for type_id, forms in _ADQL_FEATURES:
-        if type_id == _GEO_FEATURES and settings.geometry_backend == "skycell":
-            forms = tuple(sorted(forms + _SKYCELL_GEO_FEATURES))
+    for type_id, forms in (
+        (_GEO_FEATURES, _GEO_FORMS[settings.geometry_backend]),
+        *_OTHER_ADQL_FEATURES,
+    ):
         features = "".join(f"        <feature><form>{form}</form></feature>\n" for form in forms)
         blocks.append(
             f'      <languageFeatures type="{type_id}">\n{features}      </languageFeatures>\n'

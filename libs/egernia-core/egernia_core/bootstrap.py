@@ -104,6 +104,10 @@ def check_ready(conn, plugins: list[MetadataPlugin]) -> None:
             f" (TAP_SCHEMA_BOOTSTRAP_ON_STARTUP=false); run `{BOOTSTRAP_COMMAND}`"
             " against this database before deploying"
         ) from exc
+    # outside the try: a footprint column of the other backend's type is not
+    # fixed by running the bootstrap, and the error says what is
+    for plugin in plugins:
+        ingest.check_geometry_types(conn, plugin.tables)
 
 
 def startup(plugins: list[MetadataPlugin], attempts: int = 5, delay_s: float = 2.0) -> None:

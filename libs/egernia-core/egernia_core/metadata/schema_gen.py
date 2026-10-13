@@ -440,30 +440,61 @@ def ddl_statements(tables: list[TableSpec], query_role: str) -> list[str]:
     return statements
 
 
-def position_index_statements(name: str, qualified: str) -> list[str]:
-    """The index a cone search over (s_ra, s_dec) is answered from.
+# The index a cone search over (s_ra, s_dec) is answered from, by geometry
+# backend: its name suffix, its definition after ``ON <table>``, and the
+# statistics target of its one column (None: PostgreSQL's default).
+#
+# Under pgsphere, cone searches translate to ``spoint(RADIANS(s_ra),
+# RADIANS(s_dec)) @ scircle(...)``, and only an index on that *expression* is
+# ever considered -- a GiST index on a stored point column would not be.
+# Under skycell, the index is a B-tree on the position's HEALPix cell,
+# ``skycell_ang2cell(s_ra, s_dec)``, which skycell plans every ADQL spelling
+# of a cone or a cross-match through; its histogram is the density map
+# skycell's coverings are costed from, so it gets a finer statistics target.
+POSITION_INDEXES = {
+    "pgsphere": ("spoint_gist", "USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))", None),
+    "skycell": ("skycell_cell", "(skycell_ang2cell(s_ra, s_dec))", 1000),
+}
 
-    Under pgsphere, cone searches translate to ``spoint(RADIANS(s_ra),
-    RADIANS(s_dec)) @ scircle(...)``, and only an index on that *expression*
-    is ever considered — a GiST index on a stored point column would not be.
-    Under skycell, the index is a B-tree on the position's HEALPix cell,
-    ``skycell_ang2cell(s_ra, s_dec)``, which skycell plans every ADQL spelling
-    of a cone or a cross-match through; its histogram is the density map
-    skycell's coverings are costed from, so it gets a finer statistics target
-    than PostgreSQL's default.
+
+def position_index_name(table_name: str) -> str:
+    """The position index's name for a table (unqualified, as indexes are)."""
+    return f"{table_name}_{POSITION_INDEXES[settings.geometry_backend][0]}"
+
+
+def position_index_definition(table: str) -> str:
+    """``ON <table> ...``: the position index after its name."""
+    return f"ON {table} {POSITION_INDEXES[settings.geometry_backend][1]}"
+
+
+def position_statistics_statements(qualified_index: str) -> list[str]:
+    """Set the position index's statistics target, only if it is not set.
+
+    A DO block rather than a bare ALTER INDEX, which takes a lock and is DDL,
+    so that a bootstrap of an unchanged schema issues none.
     """
-    if settings.geometry_backend == "skycell":
-        # an index lives in its table's schema
-        schema = qualified.rsplit(".", 1)[0] + "." if "." in qualified else ""
-        return [
-            f"CREATE INDEX IF NOT EXISTS {name}_skycell_cell"
-            f" ON {qualified} (skycell_ang2cell(s_ra, s_dec))",
-            f"ALTER INDEX {schema}{name}_skycell_cell ALTER COLUMN 1 SET STATISTICS 1000",
-        ]
+    target = POSITION_INDEXES[settings.geometry_backend][2]
+    if target is None:
+        return []
     return [
-        f"CREATE INDEX IF NOT EXISTS {name}_spoint_gist"
-        f" ON {qualified}"
-        " USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))"
+        "DO $do$ BEGIN"
+        " IF (SELECT attstattarget FROM pg_attribute"
+        f" WHERE attrelid = '{qualified_index}'::regclass AND attnum = 1)"
+        f" IS DISTINCT FROM {target} THEN"
+        f" ALTER INDEX {qualified_index} ALTER COLUMN 1 SET STATISTICS {target};"
+        " END IF; END $do$"
+    ]
+
+
+def position_index_statements(name: str, qualified: str) -> list[str]:
+    """The index cone searches over a table's (s_ra, s_dec) use
+    (POSITION_INDEXES), and its statistics target."""
+    index = position_index_name(name)
+    # an index lives in its table's schema
+    schema = qualified.rsplit(".", 1)[0] + "." if "." in qualified else ""
+    return [
+        f"CREATE INDEX IF NOT EXISTS {index} {position_index_definition(qualified)}",
+        *position_statistics_statements(f"{schema}{index}"),
     ]
 
 

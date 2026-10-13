@@ -485,8 +485,11 @@ footprint column is a pg_sphere `spoly` or a skycell `skyregion`, and the
 cone-search index on `(s_ra, s_dec)` is a GiST on `spoint(…)` or the skycell
 cell B-tree. So the database needs the chosen extension installed before
 the services start, and switching backends on a deployment that has ingested
-metadata means rebuilding the generated tables. `ivoa.obscore` rebuilds
-itself when its index definitions change.
+metadata means rebuilding the generated tables. Startup refuses to go ahead
+until that is done: a footprint column of the other backend's type stops the
+bootstrap with an error naming it, rather than leaving ingest and geometry
+queries to fail one request at a time. `ivoa.obscore` rebuilds itself when
+its index definitions change.
 
 The `db` image installs pg_sphere always and skycell when built with a
 skycell branch or tag:
@@ -511,6 +514,10 @@ What differs under skycell:
   a 32-gon, and a POSITION as a circle of 50 milliarcseconds.
 - `COORD1`, `COORD2` and `CENTROID` work, and the capabilities document lists
   them.
+- skycell defines INTERSECTS between a point and a region only that way
+  round. A `POINT(...)` written second is moved first in translation (ADQL's
+  INTERSECTS is symmetric), but a point-typed column (ADQL 2.1) is not
+  recognisable as one there, so write it as the first argument.
 
 ## Pre-deploy schema bootstrap
 

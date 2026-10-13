@@ -18,8 +18,23 @@ from typing import Any, cast
 import egernia_core.db
 import pytest
 from egernia_core import uws
+from egernia_core.config import settings
 
 JOB_KEYS = list(uws.JOB_COLUMNS)
+
+
+@pytest.fixture(autouse=True)
+def _default_geometry_backend():
+    """The unit suite asserts the default geometry backend's SQL, so each test
+    runs under it rather than under an exported TAP_GEOMETRY_BACKEND (the
+    component suite runs under either). The setting, not the environment, and
+    only for the test: services and component tests in the same session keep
+    theirs. The skycell tests switch it themselves (``skycell`` in
+    test_skycell_backend.py)."""
+    original = settings.geometry_backend
+    object.__setattr__(settings, "geometry_backend", "pgsphere")
+    yield
+    object.__setattr__(settings, "geometry_backend", original)
 
 
 class FakeColumn:

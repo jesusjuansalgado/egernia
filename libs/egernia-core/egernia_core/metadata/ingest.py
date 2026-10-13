@@ -59,6 +59,7 @@ def ensure_schema(conn, plugin: MetadataPlugin) -> None:
     """Create the plugin's tables and register them in TAP_SCHEMA (idempotent)."""
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK_KEY,))
     tables = plugin.tables
+    check_geometry_types(conn, tables)
     for statement in ddl_statements(tables, settings.query_role):
         conn.execute(statement)
     for statement, params in registration_statements(tables, plugin.description):
@@ -67,6 +68,35 @@ def ensure_schema(conn, plugin: MetadataPlugin) -> None:
         plugin.post_ensure(conn)
     log.info("%s schema ensured (%d tables)", plugin.sql_schema, len(tables))
     _warn_legacy_tables(conn, plugin)
+
+
+def check_geometry_types(conn, tables: list[TableSpec]) -> None:
+    """Refuse to start when an existing footprint column has another
+    geometry backend's type.
+
+    The DDL is additive, so after TAP_GEOMETRY_BACKEND is changed on a
+    deployment with data, CREATE TABLE IF NOT EXISTS keeps the old column
+    (an spoly under skycell, say), and ingest and every geometry query over
+    it would then fail one request at a time. A column not created yet is
+    left to the DDL.
+    """
+    for table in tables:
+        for column in table.columns:
+            if column.derived_from is None:
+                continue
+            row = conn.execute(
+                "SELECT udt_name FROM information_schema.columns"
+                " WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+                (table.schema, table.name, column.name),
+            ).fetchone()
+            if row is not None and row[0] != column.sql_type:
+                raise RuntimeError(
+                    f"{table.qualified}.{column.name} is {row[0]}, but"
+                    f" TAP_GEOMETRY_BACKEND={settings.geometry_backend} needs"
+                    f" {column.sql_type}: the backend was changed on a deployment"
+                    " that already has its tables. Set it back, or rebuild the"
+                    " generated tables (docs/deployment.md, Geometry backend)"
+                )
 
 
 def _warn_legacy_tables(conn, plugin: MetadataPlugin) -> None:

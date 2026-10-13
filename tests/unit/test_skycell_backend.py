@@ -23,6 +23,8 @@ from egernia_core.metadata.regions import (
 from egernia_core.metadata.schema_gen import (
     build_tables,
     ddl_statements,
+    position_index_definition,
+    position_index_name,
     position_index_statements,
 )
 from egernia_core.query._adql import ADQLQueryTranslator
@@ -45,9 +47,10 @@ def sql(adql: str) -> str:
 # -- the setting ---------------------------------------------------------------
 
 
-def test_backends_and_default():
+def test_backends_and_default(monkeypatch):
     assert GEOMETRY_BACKENDS == ("pgsphere", "skycell")
-    assert settings.geometry_backend == "pgsphere"
+    monkeypatch.delenv("TAP_GEOMETRY_BACKEND", raising=False)
+    assert _choose("TAP_GEOMETRY_BACKEND", "pgsphere", GEOMETRY_BACKENDS) == "pgsphere"
 
 
 def test_backend_setting_refuses_anything_else(monkeypatch):
@@ -66,6 +69,43 @@ def test_every_backend_setting_has_its_visitors():
 
 
 # -- translation ---------------------------------------------------------------
+
+
+def test_intersects_writes_a_point_constructor_first():
+    # skycell defines intersects(skypos, skyregion) and not the reverse;
+    # ADQL's INTERSECTS is symmetric, so the point goes first
+    assert sql("SELECT * FROM t WHERE 1 = INTERSECTS(s_region_geom, POINT('ICRS', 10, 20))") == (
+        "SELECT * FROM t WHERE intersects(skycell_point(10.0, 20.0), s_region_geom) = 1;"
+    )
+    assert sql("SELECT * FROM t WHERE INTERSECTS(POINT('ICRS', 10, 20), s_region_geom) = 0") == (
+        "SELECT * FROM t WHERE intersects(skycell_point(10.0, 20.0), s_region_geom) = 0;"
+    )
+    # two regions keep the order they were written in
+    assert sql(
+        "SELECT * FROM t WHERE 1 = INTERSECTS(s_region_geom, CIRCLE('ICRS', 10, 20, 1))"
+    ) == ("SELECT * FROM t WHERE intersects(s_region_geom, skycell_circle(10.0, 20.0, 1.0)) = 1;")
+
+
+def test_coord_functions_record_their_column_as_a_geometry(monkeypatch):
+    from egernia_api.queries import query as query_module
+    from egernia_core.errors import UsageError
+
+    translator = ADQLQueryTranslator(
+        "SELECT COORD1(s_region), CENTROID(o.s_region) FROM ivoa.obscore AS o"
+        " WHERE COORD2(POINT('ICRS', 1, 2)) > 0"
+    )
+    translator.to_postgresql(*GEOMETRY_VISITORS["skycell"])
+    assert translator.geometry_columns == {"s_region", "o.s_region"}
+    # so a text column there is a usage error, not a database fault
+    monkeypatch.setattr(
+        query_module,
+        "_column_is_geometry",
+        lambda: {"ivoa.obscore.s_region": False, "ivoa.obscore.s_region_geom": True},
+    )
+    with pytest.raises(UsageError, match="s_region_geom"):
+        query_module._reject_text_geometry(
+            translator.geometry_columns, frozenset({"ivoa.obscore"}), set()
+        )
 
 
 def test_cone_is_contains_compared_with_one():
@@ -245,23 +285,43 @@ def test_position_index_is_the_skycell_cell_btree(skycell):
             "CREATE INDEX IF NOT EXISTS data_products_skycell_cell"
             " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec))"
         ),
-        "ALTER INDEX srcnet.data_products_skycell_cell ALTER COLUMN 1 SET STATISTICS 1000",
+        # only when the target is not 1000 already: no DDL on an unchanged bootstrap
+        "DO $do$ BEGIN IF (SELECT attstattarget FROM pg_attribute"
+        " WHERE attrelid = 'srcnet.data_products_skycell_cell'::regclass AND attnum = 1)"
+        " IS DISTINCT FROM 1000 THEN ALTER INDEX srcnet.data_products_skycell_cell"
+        " ALTER COLUMN 1 SET STATISTICS 1000; END IF; END $do$",
     ]
     ddl = ddl_statements(list(_skycell_tables().values()), "tap_reader")
     assert not any("spoint" in s for s in ddl)
     assert any("srcnet.data_products (skycell_ang2cell(s_ra, s_dec))" in s for s in ddl)
 
 
-def test_obscore_position_index_by_backend():
+def test_obscore_position_index_is_the_generated_tables_one():
     from egernia_api.plugins import obscore
 
-    assert obscore.POSITION_INDEXES["skycell"] == (
-        "obscore_skycell_cell",
-        "INDEX {name} ON {table} (skycell_ang2cell(s_ra, s_dec))",
+    # the default deployment keeps its pg_sphere index under its old name and
+    # definition, so the relation's fingerprint does not change on upgrade
+    assert obscore.position_index() == "obscore_spoint_gist"
+    assert obscore.index_sql("obscore_spoint_gist") == (
+        "CREATE INDEX obscore_spoint_gist ON ivoa.obscore"
+        " USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))"
     )
-    # the default deployment keeps its pg_sphere index under its old name
-    assert obscore.POSITION_INDEX == "obscore_spoint_gist"
-    assert "obscore_spoint_gist" in obscore.INDEXES
+
+
+def test_obscore_position_index_under_skycell(skycell):
+    from egernia_api.plugins import obscore
+
+    # one definition (schema_gen.POSITION_INDEXES), formatted for ivoa.obscore
+    assert position_index_name("obscore") == "obscore_skycell_cell"
+    assert position_index_definition("ivoa.obscore") == (
+        "ON ivoa.obscore (skycell_ang2cell(s_ra, s_dec))"
+    )
+    # read when used, so it follows the setting rather than the import
+    assert obscore.position_index() == "obscore_skycell_cell"
+    assert obscore.index_sql("obscore_skycell_cell", obscore.BUILD, "_build") == (
+        "CREATE INDEX obscore_skycell_cell_build ON ivoa.obscore_build"
+        " (skycell_ang2cell(s_ra, s_dec))"
+    )
 
 
 def test_dataset_generator_writes_the_footprint_type_the_column_has():
@@ -327,6 +387,32 @@ def test_the_seeder_writes_the_footprint_type_the_column_has():
     written = "\n".join(conn.statements)
     assert "skycell_circle(sky.ra, sky.dec" in written
     assert "circle_spoly" not in written
+
+
+def test_a_footprint_column_of_the_other_backend_refuses_to_start(skycell):
+    class Conn:
+        def execute(self, sql, params):
+            self.params = params
+            return self
+
+        def fetchone(self):
+            # the column as a pg_sphere deployment created it
+            return ("spoly",) if self.params[2] == "s_region_geom" else None
+
+    tables = list(_skycell_tables().values())
+    with pytest.raises(RuntimeError, match="is spoly, but TAP_GEOMETRY_BACKEND=skycell needs"):
+        ingest.check_geometry_types(Conn(), tables)
+
+
+def test_a_footprint_column_not_created_yet_is_left_to_the_ddl(skycell):
+    class Conn:
+        def execute(self, *_):
+            return self
+
+        def fetchone(self):
+            return None
+
+    ingest.check_geometry_types(Conn(), list(_skycell_tables().values()))  # no raise
 
 
 # -- capabilities --------------------------------------------------------------

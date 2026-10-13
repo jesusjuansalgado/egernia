@@ -18,13 +18,20 @@ translation is close to the identity:
 - CONTAINS and INTERSECTS stay the ADQL functions, compared with 1 or 0 as
   the query compares them. skycell plans ``contains(...) = 1`` as its
   indexed operator, whichever argument is the column and whichever way
-  round the query is written, so no operator choice is made here (and none
-  depends on argument types the translator cannot see);
+  round the query is written, so no operator choice is made here. One
+  exception: skycell defines ``intersects(skypos, skyregion)`` but not the
+  reverse, so an INTERSECTS whose second argument is a POINT constructor is
+  written point first (ADQL's INTERSECTS is symmetric). As in the pg_sphere
+  translation, a constructor is the only argument whose type is known here;
+  a point-typed column (ADQL 2.1) keeps the order it was written in;
 - DISTANCE becomes ``distance()``, in degrees, in both of its forms. Compared
   with a radius in a WHERE or JOIN ON it is planned as the same indexed cone;
 - AREA becomes ``area()``, already in square degrees;
 - COORD1, COORD2 and CENTROID pass through untranslated, as they do for
-  pg_sphere -- but under skycell they name its own functions and work.
+  pg_sphere -- but under skycell they name its own functions and work. A
+  column they take is recorded as a geometry column, like one in CONTAINS or
+  INTERSECTS, so a text column there is refused as a usage error before
+  the query reaches the database.
 
 The values are skycell's ``skypos``/``skyregion`` types, so a geometry column
 (ADQL 2.1) is one of those, and a stored footprint is a ``skyregion`` (see
@@ -54,6 +61,22 @@ def _alias_in_select(ctx, text, alias, depth):
     ):
         return f"{text} AS {alias}"
     return text
+
+
+# ADQL functions that reach skycell unchanged and take a geometry
+_PASSTHROUGH_GEOMETRY_FUNCTIONS = frozenset({"COORD1", "COORD2", "CENTROID"})
+
+
+def _is_point(sql):
+    """Whether this translated geometry argument is a POINT constructor."""
+    return sql.lstrip().startswith("skycell_point(")
+
+
+def _bare_column(ctx):
+    """The column reference ctx consists of, or None if it is anything else."""
+    while ctx.getChildCount() == 1 and not isinstance(ctx, ADQLParser.Column_referenceContext):
+        ctx = ctx.getChild(0)
+    return ctx if isinstance(ctx, ADQLParser.Column_referenceContext) else None
 
 
 def _point_coords(ctx):
@@ -175,12 +198,12 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
         self.contexts[ctx] = ctx_text
 
     def _function(self, ctx, name):
-        args = (
-            self._geometry_argument(ctx.children[2]),
-            self._geometry_argument(ctx.children[4]),
-        )
+        left = self._geometry_argument(ctx.children[2])
+        right = self._geometry_argument(ctx.children[4])
+        if name == "intersects" and _is_point(right) and not _is_point(left):
+            left, right = right, left
         _remove_children(ctx)
-        self.contexts[ctx] = f"{name}({args[0]}, {args[1]})"
+        self.contexts[ctx] = f"{name}({left}, {right})"
 
     def visitContains_predicate(self, ctx):
         self._predicate(ctx, "contains")
@@ -193,6 +216,16 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
 
     def visitIntersects(self, ctx):
         self._function(ctx, "intersects")
+
+    def visitUser_defined_function(self, ctx):
+        # COORD1/COORD2/CENTROID parse as user-defined functions; their
+        # column argument is a geometry column all the same
+        if ctx.getChild(0).getText().upper() in _PASSTHROUGH_GEOMETRY_FUNCTIONS:
+            for param in ctx.getTypedRuleContexts(ADQLParser.User_defined_function_paramContext):
+                column = _bare_column(param)
+                if column is not None:
+                    self.geometry_columns.add(column.getText())
+        return self.visitChildren(ctx)
 
     def visitDistance(self, ctx):
         if isinstance(ctx.children[2], ADQLParser.Coord_valueContext):
