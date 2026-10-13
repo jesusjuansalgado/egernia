@@ -47,29 +47,16 @@ from .ADQLParser import ADQLParser
 from .translator import (
     ADQLFunctionsTranslationVisitor,
     ADQLGeometryTranslationVisitor,
+    _aliased,
     _convert_values,
-    _get_ancestor_class_node,
+    _is_point,
+    _point_coords,
     _remove_children,
+    _select_item,
 )
-
-
-def _alias_in_select(ctx, text, alias, depth):
-    """``text AS alias`` when ctx is a bare item of the select list."""
-    derived_column = _get_ancestor_class_node(ctx, ADQLParser.Derived_columnContext, depth=depth)
-    if derived_column is not None and not any(
-        isinstance(child, ADQLParser.As_clauseContext) for child in derived_column.children
-    ):
-        return f"{text} AS {alias}"
-    return text
-
 
 # ADQL functions that reach skycell unchanged and take a geometry
 _PASSTHROUGH_GEOMETRY_FUNCTIONS = frozenset({"COORD1", "COORD2", "CENTROID"})
-
-
-def _is_point(sql):
-    """Whether this translated geometry argument is a POINT constructor."""
-    return sql.lstrip().startswith("skycell_point(")
 
 
 def _bare_column(ctx):
@@ -79,28 +66,42 @@ def _bare_column(ctx):
     return ctx if isinstance(ctx, ADQLParser.Column_referenceContext) else None
 
 
-def _point_coords(ctx):
-    """The (ra, dec) of a POINT constructor, skipping a coordinate system."""
-    coords = []
-    if len(ctx.children) > 4:
-        for j in (2, 4):
-            coords.extend(_convert_values(ctx, j))
-    else:
-        coords.extend(_convert_values(ctx, 2))
-    if len(coords) == 3:
-        coords = coords[1:]
-    return coords[0], coords[1]
+def _bare_select_item(ctx):
+    """The select-list item ctx is the whole expression of, or None."""
+    while (
+        ctx.parentCtx is not None
+        and not isinstance(ctx.parentCtx, ADQLParser.Derived_columnContext)
+        and ctx.parentCtx.getChildCount() == 1
+    ):
+        ctx = ctx.parentCtx
+    parent = ctx.parentCtx
+    return parent if isinstance(parent, ADQLParser.Derived_columnContext) else None
+
+
+def _position(ra, dec):
+    """``ra, dec`` of a position as skycell holds it (RA in [0, 360))."""
+    point = f"skycell_point({ra}, {dec})"
+    return f"coord1({point}), coord2({point})"
 
 
 class SkycellGeometryTranslationVisitor(ADQLGeometryTranslationVisitor):
-    """The geometry constructors, as skycell functions in degrees."""
+    """The geometry constructors, as skycell functions in degrees.
+
+    In the select list a constructor is a DALI array of doubles in degrees,
+    as the pg_sphere translation returns it (``spoint_to_array_deg`` and
+    friends): ``[ra, dec]`` for a POINT, ``[ra, dec, radius]`` for a CIRCLE
+    and ``[ra1, dec1, ...]`` for a POLYGON.
+    """
 
     def __init__(self):
         super().__init__(conunits="")
 
     def visitPoint(self, ctx):
         ra, dec = _point_coords(ctx)
-        ctx_text = _alias_in_select(ctx, f"skycell_point({ra}, {dec})", "adql_point", 3)
+        ctx_text = f"skycell_point({ra}, {dec})"
+        item = _select_item(ctx, 3)
+        if item is not None:
+            ctx_text = _aliased(f"ARRAY[{_position(ra, dec)}]", item, "adql_point")
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
@@ -112,23 +113,11 @@ class SkycellGeometryTranslationVisitor(ADQLGeometryTranslationVisitor):
         if len(pars) != 4:
             raise QueryError("BOX needs a centre, a width and a height")
         try:
-            ra, dec, half_w, half_h = (
-                float(pars[0]),
-                float(pars[1]),
-                float(pars[2]) / 2,
-                float(pars[3]) / 2,
-            )
+            ra, dec, width, height = (float(p) for p in pars)
         except ValueError:
             # the pg_sphere translation takes numbers only, too
             raise QueryError("sbox values incorrect") from None
-        corners = (
-            (ra - half_w, dec - half_h),
-            (ra + half_w, dec - half_h),
-            (ra + half_w, dec + half_h),
-            (ra - half_w, dec + half_h),
-        )
-        vertices = ", ".join(f"{a:.12f}, {d:.12f}" for a, d in corners)
-        ctx_text = f"skycell_polygon({vertices})"
+        ctx_text = f"skycell_polygon({_box_vertices(ra, dec, width, height)})"
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
@@ -152,7 +141,10 @@ class SkycellGeometryTranslationVisitor(ADQLGeometryTranslationVisitor):
                     " instance, CIRCLE(POINT(t.ra, t.dec), 0.1)"
                 )
             ra, dec = _point_coords(point_ctx)
-        ctx_text = _alias_in_select(ctx, f"skycell_circle({ra}, {dec}, {radius})", "circle", 3)
+        ctx_text = f"skycell_circle({ra}, {dec}, {radius})"
+        item = _select_item(ctx, 3)
+        if item is not None:
+            ctx_text = _aliased(f"ARRAY[{_position(ra, dec)}, {radius}]", item, "circle")
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
@@ -165,9 +157,43 @@ class SkycellGeometryTranslationVisitor(ADQLGeometryTranslationVisitor):
             if len(par) > 1:
                 coords.extend(par[:2])
         ctx_text = f"skycell_polygon({', '.join(str(c) for c in coords)})"
-        ctx_text = _alias_in_select(ctx, ctx_text, "adql_polygon", 3)
+        item = _select_item(ctx, 3)
+        if item is not None:
+            vertices = ", ".join(
+                _position(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)
+            )
+            ctx_text = _aliased(f"ARRAY[{vertices}]", item, "adql_polygon")
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
+
+
+def _box_vertices(ra, dec, width, height):
+    """The skycell_polygon arguments for a BOX's coordinate range.
+
+    RA is normalised into [0, 360) and Dec clamped to [-90, 90], so a box
+    reaching past a pole means the cap of the RA range above (or below) its
+    other edge -- the two corners that would both sit on the pole become the
+    pole itself, which skycell needs (it refuses a repeated vertex). A box
+    with no area, or as wide as 180 degrees or more, has no convex polygon
+    that is its coordinate range, so it is refused.
+    """
+    if width <= 0 or height <= 0:
+        raise QueryError("BOX needs a positive width and height")
+    if width >= 180:
+        raise QueryError(
+            "BOX must be narrower than 180 degrees in RA under the skycell backend:"
+            " a wider coordinate range is not a convex polygon"
+        )
+    lo_ra, hi_ra = (ra - width / 2) % 360, (ra + width / 2) % 360
+    lo_dec, hi_dec = max(dec - height / 2, -90.0), min(dec + height / 2, 90.0)
+    if lo_dec >= hi_dec:
+        raise QueryError("BOX has no area: its Dec range lies beyond a pole")
+    corners = [(lo_ra, lo_dec), (hi_ra, lo_dec), (hi_ra, hi_dec), (lo_ra, hi_dec)]
+    if hi_dec == 90.0:
+        corners[2:] = [(ra % 360, 90.0)]
+    if lo_dec == -90.0:
+        corners[:2] = [(ra % 360, -90.0)]
+    return ", ".join(f"{a:.12f}, {d:.12f}" for a, d in corners)
 
 
 class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
@@ -178,7 +204,7 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
 
     def visitArea(self, ctx):
         arg = self._geometry_argument(ctx.children[2])
-        ctx_text = _alias_in_select(ctx, f"area({arg})", "adql_area", 9)
+        ctx_text = _aliased(f"area({arg})", _select_item(ctx, 9), "adql_area")
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
@@ -200,7 +226,11 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
     def _function(self, ctx, name):
         left = self._geometry_argument(ctx.children[2])
         right = self._geometry_argument(ctx.children[4])
-        if name == "intersects" and _is_point(right) and not _is_point(left):
+        if (
+            name == "intersects"
+            and _is_point(right, "skycell_point")
+            and not _is_point(left, "skycell_point")
+        ):
             left, right = right, left
         _remove_children(ctx)
         self.contexts[ctx] = f"{name}({left}, {right})"
@@ -220,12 +250,41 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
     def visitUser_defined_function(self, ctx):
         # COORD1/COORD2/CENTROID parse as user-defined functions; their
         # column argument is a geometry column all the same
-        if ctx.getChild(0).getText().upper() in _PASSTHROUGH_GEOMETRY_FUNCTIONS:
-            for param in ctx.getTypedRuleContexts(ADQLParser.User_defined_function_paramContext):
+        name = ctx.getChild(0).getText().upper()
+        params = ctx.getTypedRuleContexts(ADQLParser.User_defined_function_paramContext)
+        if name in _PASSTHROUGH_GEOMETRY_FUNCTIONS:
+            for param in params:
                 column = _bare_column(param)
                 if column is not None:
                     self.geometry_columns.add(column.getText())
-        return self.visitChildren(ctx)
+        result = self.visitChildren(ctx)
+        # a CENTROID that is a select item is a POINT there: [ra, dec]
+        if name == "CENTROID" and len(params) == 1 and _bare_select_item(ctx) is not None:
+            argument = self._sql_of(params[0])
+            if argument is not None:
+                centre = f"centroid({argument})"
+                text = _aliased(
+                    f"ARRAY[coord1({centre}), coord2({centre})]",
+                    _bare_select_item(ctx),
+                    "centroid",
+                )
+                # printed through the one token left, the function's "(": a
+                # token of the name would be glued to the next one
+                ctx.children = [ctx.getChild(1)]
+                self.contexts[ctx] = text
+        return result
+
+    def _sql_of(self, ctx):
+        """The SQL for an argument that is a column or a translated
+        constructor, or None for anything else."""
+        while True:
+            if ctx in self.contexts:
+                return self.contexts[ctx]
+            if isinstance(ctx, ADQLParser.Column_referenceContext):
+                return ctx.getText()
+            if ctx.getChildCount() != 1:
+                return None
+            ctx = ctx.getChild(0)
 
     def visitDistance(self, ctx):
         if isinstance(ctx.children[2], ADQLParser.Coord_valueContext):
@@ -236,7 +295,7 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
         else:
             args = tuple(_convert_values(ctx, i)[0] for i in (2, 4, 6, 8))
         ctx_text = f"distance({', '.join(str(a) for a in args)})"
-        ctx_text = _alias_in_select(ctx, ctx_text, "distance", 9)
+        ctx_text = _aliased(ctx_text, _select_item(ctx, 9), "distance")
         for _ in range(ctx.getChildCount() - 1):
             ctx.removeLastChild()
         self.contexts[ctx] = ctx_text

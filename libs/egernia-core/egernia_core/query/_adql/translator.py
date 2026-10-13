@@ -125,6 +125,36 @@ def _convert_values(ctx, cidx):
     return vals
 
 
+def _select_item(ctx, depth):
+    """The select-list item (derived column) ctx is the whole expression of,
+    or None. depth is how many levels above ctx's rule the item sits."""
+    return _get_ancestor_class_node(ctx, ADQLParser.Derived_columnContext,
+                                    depth=depth)
+
+
+def _aliased(text, item, alias):
+    """``text AS alias`` for a select item that does not name itself."""
+    if item is not None and not any(
+            isinstance(child, ADQLParser.As_clauseContext)
+            for child in item.children):
+        return f"{text} AS {alias}"
+    return text
+
+
+def _point_coords(ctx):
+    """The (lon, lat) of a POINT constructor, without the deprecated
+    coordinate system."""
+    coords = []
+    if len(ctx.children) > 4:
+        for j in (2, 4):
+            coords.extend(_convert_values(ctx, j))
+    else:
+        coords.extend(_convert_values(ctx, 2))
+    if len(coords) == 3:
+        coords = coords[1:]
+    return coords[0], coords[1]
+
+
 def _get_ancestor_class_node(ctx, ancestor_class, depth=1):
     """ Returns the ancestor node at 'depth' level above the current node if
     the node is of type 'ancestor_class'. Otherwise, returns None
@@ -197,25 +227,13 @@ class ADQLGeometryTranslationVisitor(ADQLParserVisitor):
         self.contexts[ctx] = 'AS ' + ri
 
     def visitPoint(self, ctx):
-        coords = []
-        if len(ctx.children) > 4:
-            for j in (2, 4):
-                coords.extend(self._convert_values(ctx, j))
-        else:
-            coords.extend(self._convert_values(ctx, 2))
-
-        if len(coords) == 3:
-            coords = coords[1:]
-
-        ctx_text = "spoint( %s(%s), %s(%s) )" % (self.conunits, coords[0],
-                                                 self.conunits, coords[1])
-        derived_column = _get_ancestor_class_node(
-            ctx, ADQLParser.Derived_columnContext, depth=3)
-        if derived_column is not None:
-            ctx_text = f"spoint_to_array_deg({ctx_text})"
-            if not (any([isinstance(child, ADQLParser.As_clauseContext)
-                         for child in derived_column.children])):
-                ctx_text = f"{ctx_text} AS adql_point"
+        lon, lat = _point_coords(ctx)
+        ctx_text = "spoint( %s(%s), %s(%s) )" % (self.conunits, lon,
+                                                 self.conunits, lat)
+        item = _select_item(ctx, 3)
+        if item is not None:
+            ctx_text = _aliased(f"spoint_to_array_deg({ctx_text})", item,
+                                "adql_point")
 
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
@@ -271,13 +289,10 @@ class ADQLGeometryTranslationVisitor(ADQLParserVisitor):
 
         ctx_text = "scircle( %s, %s(%s) )" %\
             (point_ctx_text, self.conunits, radius)
-        derived_column = _get_ancestor_class_node(
-            ctx, ADQLParser.Derived_columnContext, depth=3)
-        if derived_column is not None:
-            ctx_text = f"scircle_to_array_deg({ctx_text})"
-            if not (any([isinstance(child, ADQLParser.As_clauseContext)
-                         for child in derived_column.children])):
-                ctx_text = f"{ctx_text} AS circle"
+        item = _select_item(ctx, 3)
+        if item is not None:
+            ctx_text = _aliased(f"scircle_to_array_deg({ctx_text})", item,
+                                "circle")
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
 
@@ -299,13 +314,10 @@ class ADQLGeometryTranslationVisitor(ADQLParserVisitor):
         for p in pars:
             ctx_text += '(%s%s,%s%s),' % (str(p[0]), ustr, str(p[1]), ustr)
         ctx_text = ctx_text[:-1] + "}')"
-        derived_column = _get_ancestor_class_node(
-            ctx, ADQLParser.Derived_columnContext, depth=3)
-        if derived_column is not None:
-            ctx_text = f"spoly_to_array_deg({ctx_text})"
-            if not (any([isinstance(child, ADQLParser.As_clauseContext)
-                         for child in derived_column.children])):
-                ctx_text = f"{ctx_text} AS adql_polygon"
+        item = _select_item(ctx, 3)
+        if item is not None:
+            ctx_text = _aliased(f"spoly_to_array_deg({ctx_text})", item,
+                                "adql_polygon")
 
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
@@ -347,13 +359,8 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
 
     def visitArea(self, ctx):
         arg = self._geometry_argument(ctx.children[2])
-        ctx_text = 'square_degrees(area(%s))' % arg
-        derived_column = _get_ancestor_class_node(
-            ctx, ADQLParser.Derived_columnContext, depth=9)
-        if derived_column is not None:
-            if not (any([isinstance(child, ADQLParser.As_clauseContext)
-                         for child in derived_column.children])):
-                ctx_text = f"{ctx_text} AS adql_area"
+        ctx_text = _aliased('square_degrees(area(%s))' % arg,
+                            _select_item(ctx, 9), "adql_area")
 
         for _ in range(ctx.getChildCount() - 1):
             ctx.removeLastChild()
@@ -407,13 +414,8 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
                    f"spoint(RADIANS({_convert_values(ctx, 6)[0]}), " +
                           f"RADIANS({_convert_values(ctx, 8)[0]}))")
 
-        ctx_text = '%s(%s <-> %s)' % ((self.conunits, ) + arg)
-        derived_column = _get_ancestor_class_node(
-            ctx, ADQLParser.Derived_columnContext, depth=9)
-        if derived_column is not None:
-            if not (any([isinstance(child, ADQLParser.As_clauseContext)
-                         for child in derived_column.children])):
-                ctx_text = f"{ctx_text} AS distance"
+        ctx_text = _aliased('%s(%s <-> %s)' % ((self.conunits, ) + arg),
+                            _select_item(ctx, 9), "distance")
 
         for _ in range(ctx.getChildCount() - 1):
             ctx.removeLastChild()
@@ -478,9 +480,10 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         self.contexts[ctx] = ctx_text
 
 
-def _is_point(sql):
-    """Whether this translated geometry argument is a POINT constructor."""
-    return sql.lstrip().startswith('spoint(')
+def _is_point(sql, constructor='spoint'):
+    """Whether this translated geometry argument is a POINT constructor
+    (pg_sphere's ``spoint``, or another backend's)."""
+    return sql.lstrip().startswith(constructor + '(')
 
 
 def _negate_intersects(sql):

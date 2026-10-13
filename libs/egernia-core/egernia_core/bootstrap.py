@@ -18,7 +18,7 @@ import logging
 import time
 
 from . import uws
-from .config import settings
+from .config import geometry_backend, settings
 from .db import close_pool
 from .db import connection as db_connection
 from .metadata import ingest
@@ -34,8 +34,33 @@ def bootstrap(conn, plugins: list[MetadataPlugin]) -> None:
     each plugin's generated tables and TAP_SCHEMA registration."""
     uws.ensure_job_columns(conn)
     ensure_tap_schema_self(conn)
+    ensure_geometry_functions(conn)
     for plugin in plugins:
         ingest.ensure_schema(conn, plugin)
+
+
+def ensure_geometry_functions(conn) -> None:
+    """Create the SQL functions the geometry backend's translation calls and
+    its extension does not define (geometry.py, support_functions).
+
+    Each is created only when missing, so a bootstrap of an unchanged
+    database issues no DDL; and only when the extension is installed -- a
+    deployment without it has no geometry to translate, and db/init lets it
+    start without one.
+    """
+    backend = geometry_backend()
+    if not backend.support_functions:
+        return
+    installed = conn.execute(
+        "SELECT 1 FROM pg_extension WHERE extname = %s", (backend.extension,)
+    ).fetchone()
+    if installed is None:
+        log.warning("%s is not installed: ADQL geometry functions will fail", backend.extension)
+        return
+    for function in backend.support_functions:
+        exists = conn.execute("SELECT to_regprocedure(%s)", (function.signature,)).fetchone()[0]
+        if exists is None:
+            conn.execute(function.definition)
 
 
 def ensure_tap_schema_self(conn) -> None:

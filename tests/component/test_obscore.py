@@ -4,7 +4,6 @@ keep it current, and the declarations a validator reads (capabilities,
 /tables) say so."""
 
 import copy
-import os
 
 import httpx
 import pytest
@@ -368,8 +367,9 @@ def test_a_deployment_still_serving_the_view_is_migrated_to_the_table(tap_servic
     running — and leave the triggers behind so the next write is followed."""
     import psycopg
     from egernia_core import bootstrap
+    from egernia_core.config import GEOMETRY_BACKENDS, _choose
+    from egernia_core.geometry import BACKENDS
     from egernia_core.metadata.plugins import active_plugins
-    from egernia_core.metadata.schema_gen import POSITION_INDEXES
 
     with psycopg.connect(database_url) as conn:
         before = _checksum(conn, "SELECT * FROM ivoa.obscore")
@@ -394,10 +394,11 @@ def test_a_deployment_still_serving_the_view_is_migrated_to_the_table(tap_servic
                 " AND tablename = 'obscore'"
             )
         }
-        # the position index of the backend the services run under (read from
-        # their environment: this process's settings may be pinned by a suite)
-        backend = os.environ.get("TAP_GEOMETRY_BACKEND", "").strip().lower() or "pgsphere"
-        position_index = f"obscore_{POSITION_INDEXES[backend][0]}"
+        # the position index of the backend the services run under, parsed
+        # from their environment as the services parse it (this process's
+        # settings may be pinned by a suite)
+        backend = BACKENDS[_choose("TAP_GEOMETRY_BACKEND", "pgsphere", GEOMETRY_BACKENDS)]
+        position_index = f"obscore_{backend.position_index_suffix}"
         assert {"obscore_did_key", "obscore_did_trgm", position_index} <= indexes
         triggers = {
             row[0]

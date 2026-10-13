@@ -34,7 +34,7 @@ import annotated_types
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from ..config import settings
+from ..config import geometry_backend
 
 SQL_TYPES = {
     str: "text",
@@ -243,17 +243,16 @@ def _scalar_column(
 # or a skycell skyregion under the skycell geometry backend.
 REGION_SOURCE = "s_region"
 REGION_SUFFIX = "_geom"
-REGION_TYPES = {"pgsphere": "spoly", "skycell": "skyregion"}
 
 
 def _region_companion(source: ColumnSpec) -> ColumnSpec:
-    backend = settings.geometry_backend
+    backend = geometry_backend()
     return ColumnSpec(
         name=f"{source.name}{REGION_SUFFIX}",
-        sql_type=REGION_TYPES[backend],
+        sql_type=backend.region_type,
         nullable=True,
         description=(
-            f"{backend} footprint derived from "
+            f"{backend.name} footprint derived from "
             f"{source.name} at ingestion; query it with INTERSECTS/CONTAINS"
         ),
         derived_from=source.name,
@@ -440,31 +439,14 @@ def ddl_statements(tables: list[TableSpec], query_role: str) -> list[str]:
     return statements
 
 
-# The index a cone search over (s_ra, s_dec) is answered from, by geometry
-# backend: its name suffix, its definition after ``ON <table>``, and the
-# statistics target of its one column (None: PostgreSQL's default).
-#
-# Under pgsphere, cone searches translate to ``spoint(RADIANS(s_ra),
-# RADIANS(s_dec)) @ scircle(...)``, and only an index on that *expression* is
-# ever considered -- a GiST index on a stored point column would not be.
-# Under skycell, the index is a B-tree on the position's HEALPix cell,
-# ``skycell_ang2cell(s_ra, s_dec)``, which skycell plans every ADQL spelling
-# of a cone or a cross-match through; its histogram is the density map
-# skycell's coverings are costed from, so it gets a finer statistics target.
-POSITION_INDEXES = {
-    "pgsphere": ("spoint_gist", "USING gist (spoint(RADIANS(s_ra), RADIANS(s_dec)))", None),
-    "skycell": ("skycell_cell", "(skycell_ang2cell(s_ra, s_dec))", 1000),
-}
-
-
 def position_index_name(table_name: str) -> str:
     """The position index's name for a table (unqualified, as indexes are)."""
-    return f"{table_name}_{POSITION_INDEXES[settings.geometry_backend][0]}"
+    return f"{table_name}_{geometry_backend().position_index_suffix}"
 
 
 def position_index_definition(table: str) -> str:
     """``ON <table> ...``: the position index after its name."""
-    return f"ON {table} {POSITION_INDEXES[settings.geometry_backend][1]}"
+    return f"ON {table} {geometry_backend().position_index_definition}"
 
 
 def position_statistics_statements(qualified_index: str) -> list[str]:
@@ -473,7 +455,7 @@ def position_statistics_statements(qualified_index: str) -> list[str]:
     A DO block rather than a bare ALTER INDEX, which takes a lock and is DDL,
     so that a bootstrap of an unchanged schema issues none.
     """
-    target = POSITION_INDEXES[settings.geometry_backend][2]
+    target = geometry_backend().position_index_statistics
     if target is None:
         return []
     statement = (
@@ -489,7 +471,7 @@ def position_statistics_statements(qualified_index: str) -> list[str]:
 
 def position_index_statements(name: str, qualified: str) -> list[str]:
     """The index cone searches over a table's (s_ra, s_dec) use
-    (POSITION_INDEXES), and its statistics target."""
+    (geometry.py), and its statistics target."""
     index = position_index_name(name)
     # an index lives in its table's schema
     schema = qualified.rsplit(".", 1)[0] + "." if "." in qualified else ""

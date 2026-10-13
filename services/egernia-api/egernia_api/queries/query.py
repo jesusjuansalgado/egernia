@@ -12,6 +12,7 @@ from typing import Any, cast
 from egernia_core.config import settings
 from egernia_core.db import connection as db_connection
 from egernia_core.errors import UsageError
+from egernia_core.geometry import GEOMETRY_TYPES
 from egernia_core.metadata.schema_gen import REGION_SUFFIX
 from egernia_core.observability import QUERY_DURATION, tag_sql
 from egernia_core.query.adql import apply_maxrec, check_language, translate
@@ -163,16 +164,6 @@ def _published_tables(*, refresh: bool = False) -> frozenset[str]:
         return tables
 
 
-# The spatial types of pgsphere and of skycell. A column is queryable with
-# INTERSECTS/CONTAINS exactly when PostgreSQL holds it as one of these;
-# TAP_SCHEMA cannot answer this, because its VOTable datatype for spoly or
-# skyregion is "char" — the same as the STC-S text the footprint was derived
-# from.
-_GEOMETRY_TYPES = frozenset(
-    {"spoly", "spoint", "scircle", "sbox", "spath", "sline", "skypos", "skyregion"}
-)
-
-
 @functools.cache
 def _column_is_geometry() -> dict[str, bool]:
     """``schema.table.column`` -> whether PostgreSQL holds it as a geometry.
@@ -193,7 +184,7 @@ def _column_is_geometry() -> dict[str, bool]:
             " WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
         ).fetchall()
     return {
-        f"{schema}.{table}.{column}".lower(): udt in _GEOMETRY_TYPES
+        f"{schema}.{table}.{column}".lower(): udt in GEOMETRY_TYPES
         for schema, table, column, udt in rows
     }
 

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlsplit
 
+from . import geometry
+
 TRUE_VALUES = ("1", "true", "yes", "on")
 FALSE_VALUES = ("0", "false", "no", "off")
 
@@ -71,11 +73,8 @@ def _choice(name: str, default: str, choices: tuple[str, ...]):
     return field(default_factory=lambda: _choose(name, default, choices))
 
 
-#: The PostgreSQL extensions ADQL geometry can be translated for: pg_sphere
-#: (``spoint``/``scircle``/``@``) or skycell (ADQL's own function names on
-#: ``skypos``/``skyregion``, indexed by a HEALPix cell B-tree). See
-#: query/_adql/skycell.py.
-GEOMETRY_BACKENDS = ("pgsphere", "skycell")
+#: The PostgreSQL extensions ADQL geometry can be translated for (geometry.py).
+GEOMETRY_BACKENDS = tuple(geometry.BACKENDS)
 
 
 @dataclass(frozen=True)
@@ -247,6 +246,12 @@ class Settings:
 
 
 settings = Settings()
+
+
+def geometry_backend() -> geometry.GeometryBackend:
+    """The geometry backend TAP_GEOMETRY_BACKEND names (geometry.py), read
+    from the settings on each call."""
+    return geometry.BACKENDS[settings.geometry_backend]
 
 
 # The origin (scheme://host) the client used to reach us, for the duration of

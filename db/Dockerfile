@@ -13,15 +13,23 @@ RUN apt-get update \
 
 # skycell (https://github.com/jesusjuansalgado/skycell), the alternative
 # geometry backend (TAP_GEOMETRY_BACKEND=skycell), built from source when
-# SKYCELL_REF names a branch or tag of SKYCELL_REPO. Left out by default; the
-# toolchain is removed again so the image only gains the extension itself.
+# SKYCELL_REF names a commit (preferred: the build is then reproducible), a
+# tag or a branch of SKYCELL_REPO. Left out by default. The commit actually
+# built is recorded in the image (/usr/share/skycell/COMMIT) and the
+# extension's own version in pg_available_extensions, so a deployment can be
+# traced to the skycell it runs. The toolchain is removed again so the image
+# only gains the extension itself.
 ARG SKYCELL_REPO=https://github.com/jesusjuansalgado/skycell
 ARG SKYCELL_REF=
 RUN if [ -n "$SKYCELL_REF" ]; then \
         apt-get update \
         && apt-get install -y --no-install-recommends \
             build-essential ca-certificates git postgresql-server-dev-18 \
-        && git clone --depth 1 --branch "$SKYCELL_REF" "$SKYCELL_REPO" /tmp/skycell \
+        && git init -q /tmp/skycell \
+        && git -C /tmp/skycell fetch -q --depth 1 "$SKYCELL_REPO" "$SKYCELL_REF" \
+        && git -C /tmp/skycell checkout -q FETCH_HEAD \
+        && mkdir -p /usr/share/skycell \
+        && git -C /tmp/skycell rev-parse HEAD > /usr/share/skycell/COMMIT \
         && make -C /tmp/skycell/ext with_llvm=no install \
         && rm -rf /tmp/skycell \
         && apt-get purge -y --auto-remove build-essential git postgresql-server-dev-18 \

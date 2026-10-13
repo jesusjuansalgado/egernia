@@ -213,9 +213,11 @@ def stcs_to_skyregion(region: str | None) -> str | None:
     """The skycell ``skyregion`` literal (STC-S, ICRS) for an STC-S region.
 
     ``None`` stays ``None``. Raises ``ValueError`` for anything outside the
-    supported subset (``_parse``), and ``UnsupportedRegion`` for a POLYGON
-    that is not convex, which skycell cannot store. A repeated closing vertex
-    is dropped: it is the same polygon, and skycell wants each vertex once.
+    supported subset (``_parse``) and for a POLYGON that is malformed
+    (``_ring``), and ``UnsupportedRegion`` for a well-formed POLYGON that is
+    not convex, which skycell cannot store. A CIRCLE radius is passed through
+    up to the 180 degrees ``_parse`` accepts: skycell holds a cap wider than a
+    hemisphere as one, and answers it the same with and without its index.
     """
     if region is None:
         return None
@@ -226,12 +228,50 @@ def stcs_to_skyregion(region: str | None) -> str | None:
     if shape == "POSITION":
         ra, dec = values
         return f"CIRCLE ICRS {_fixed(ra)} {_fixed(dec)} {_fixed(POSITION_RADIUS_DEG)}"
-    points = list(zip(values[0::2], values[1::2], strict=True))
-    if len(points) > 3 and points[0] == points[-1]:
-        points = points[:-1]
-    if len(points) < 3 or not _is_convex(points):
+    points = _ring(region, list(zip(values[0::2], values[1::2], strict=True)))
+    if not _is_convex(points):
         raise UnsupportedRegion(
             f"s_region {region!r} is not a convex polygon, which the skycell"
             " geometry backend cannot store"
         )
     return "POLYGON ICRS " + " ".join(f"{_fixed(ra)} {_fixed(dec)}" for ra, dec in points)
+
+
+def _same_point(a: tuple, b: tuple) -> bool:
+    """Whether two unit vectors are one point, to skycell's tolerance (the
+    zero-length edge it refuses, ``cover.c``)."""
+    c = _cross(a, b)
+    return _dot(a, b) > 0 and math.sqrt(_dot(c, c)) < 1e-15
+
+
+def _ring(region: str, points: list[tuple]) -> list[tuple]:
+    """A polygon's vertices, each once, or ValueError if they are no polygon.
+
+    A vertex repeated in a row -- the closing vertex included -- is the same
+    polygon written twice, and is dropped, as pg_sphere stores it. What is
+    left must be at least three distinct vertices, none repeated elsewhere in
+    the ring, not all on one great circle: anything else is malformed input,
+    refused as the caller's mistake rather than stored as a NULL footprint
+    (which is kept for a well-formed polygon skycell cannot store).
+    """
+    ring: list[tuple] = []
+    for point in points:
+        if not ring or not _same_point(_unit(*ring[-1]), _unit(*point)):
+            ring.append(point)
+    if len(ring) > 1 and _same_point(_unit(*ring[0]), _unit(*ring[-1])):
+        ring.pop()
+    vectors = [_unit(ra, dec) for ra, dec in ring]
+    if len(ring) < 3:
+        raise ValueError(
+            f"invalid s_region {region!r}: a POLYGON needs at least 3 distinct vertices"
+        )
+    for i, vi in enumerate(vectors):
+        if any(_same_point(vi, vj) for vj in vectors[i + 1 :]):
+            raise ValueError(f"invalid s_region {region!r}: a vertex is repeated in the ring")
+    normal = _cross(vectors[0], vectors[1])
+    if all(abs(_dot(normal, v)) < 1e-12 for v in vectors[2:]):
+        raise ValueError(
+            f"invalid s_region {region!r}: its vertices lie on one great circle,"
+            " so it encloses no area"
+        )
+    return ring

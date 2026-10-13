@@ -68,7 +68,7 @@ class MetadataPlugin:
 
 # MetadataPlugin is eq=False, so instances hash by identity and cache safely.
 # The geometry backend is part of the key because it decides the footprint
-# column's type (schema_gen.REGION_TYPES).
+# column's type (geometry.py, region_type).
 @cache
 def _tables(plugin: MetadataPlugin, geometry_backend: str) -> list[TableSpec]:
     return build_tables(

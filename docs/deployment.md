@@ -495,7 +495,9 @@ The `db` image installs pg_sphere always and skycell when built with a
 skycell branch or tag:
 
 ```bash
-SKYCELL_REF=main TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
+# a commit (or a tag): the build is reproducible, and the commit is
+# recorded in the image at /usr/share/skycell/COMMIT
+SKYCELL_REF=<commit> TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
 ```
 
 With Helm, set `config.geometryBackend: skycell` and use a tap-db image built

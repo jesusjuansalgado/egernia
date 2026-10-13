@@ -20,6 +20,7 @@ from enum import Enum
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from .. import geometry
 from ..config import settings
 from ..errors import UsageError
 from . import regions
@@ -31,10 +32,7 @@ from .schema_gen import TableSpec, ddl_statements, registration_statements
 # error is the caller's mistake, so it surfaces as UsageError -- except a
 # valid region the geometry backend cannot represent (a non-convex polygon
 # under skycell), which is stored as NULL so the document still ingests.
-DERIVATIONS = {
-    "spoly": regions.stcs_to_spoly,
-    "skyregion": regions.stcs_to_skyregion,
-}
+DERIVATIONS = {b.region_type: b.derive_region for b in geometry.BACKENDS.values()}
 DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 1000
 

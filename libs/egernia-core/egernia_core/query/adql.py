@@ -20,6 +20,7 @@ from antlr4 import BailErrorStrategy, PredictionMode
 from queryparser.exceptions import QueryError, QuerySyntaxError
 from queryparser.postgresql import PostgreSQLQueryProcessor
 
+from .. import geometry
 from ..config import settings
 from ..errors import QueryParseError
 from ..observability import (
@@ -45,11 +46,14 @@ from ._adql.translator import (
 
 log = logging.getLogger("egernia_core")
 
-#: The ADQL geometry and function visitors for each TAP_GEOMETRY_BACKEND.
+#: The ADQL geometry and function visitors for each TAP_GEOMETRY_BACKEND: the
+#: one per-backend piece kept beside the translator rather than in geometry.py
 GEOMETRY_VISITORS = {
     "pgsphere": (ADQLGeometryTranslationVisitor, ADQLFunctionsTranslationVisitor),
     "skycell": (SkycellGeometryTranslationVisitor, SkycellFunctionsTranslationVisitor),
 }
+if GEOMETRY_VISITORS.keys() != geometry.BACKENDS.keys():
+    raise RuntimeError("GEOMETRY_VISITORS and geometry.BACKENDS name different backends")
 
 SUPPORTED_LANGUAGES = {"ADQL", "ADQL-2.0", "ADQL-2.1"}
 

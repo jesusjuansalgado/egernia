@@ -529,7 +529,7 @@ def select_sql(products: str = "srcnet.data_products") -> str:
 def position_index() -> str:
     """The index a cone search over (s_ra, s_dec) is answered from: the same
     one, for the configured geometry backend, as a generated table carrying
-    the position pair gets (schema_gen.POSITION_INDEXES)."""
+    the position pair gets (geometry.py)."""
     return position_index_name("obscore")
 
 

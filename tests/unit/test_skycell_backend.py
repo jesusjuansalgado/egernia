@@ -29,6 +29,7 @@ from egernia_core.metadata.schema_gen import (
 )
 from egernia_core.query._adql import ADQLQueryTranslator
 from egernia_core.query.adql import GEOMETRY_VISITORS, translate
+from queryparser.exceptions import QueryError
 
 
 @pytest.fixture
@@ -173,13 +174,61 @@ def test_distance_both_forms_in_degrees():
     )
 
 
-def test_select_list_geometry_and_area():
+def test_select_list_geometry_is_an_array_of_doubles_in_degrees():
+    # the shape the pg_sphere translation returns (spoint_to_array_deg and
+    # friends, geometry.py): [ra, dec], [ra, dec, radius], [ra1, dec1, ...]
     assert sql(
-        "SELECT AREA(s_region_geom), POINT('ICRS', ra, dec), CIRCLE('ICRS', ra, dec, 1) FROM t"
+        "SELECT AREA(s_region_geom), POINT('ICRS', ra, dec), CIRCLE('ICRS', ra, dec, 1) AS c,"
+        " POLYGON('ICRS', 10, 20, 11, 20, 11, 21) FROM t"
     ) == (
-        "SELECT area(s_region_geom) AS adql_area, skycell_point(ra, dec) AS adql_point,"
-        " skycell_circle(ra, dec, 1.0) AS circle FROM t;"
+        "SELECT area(s_region_geom) AS adql_area,"
+        " ARRAY[coord1(skycell_point(ra, dec)), coord2(skycell_point(ra, dec))] AS adql_point,"
+        " ARRAY[coord1(skycell_point(ra, dec)), coord2(skycell_point(ra, dec)), 1.0] AS c,"
+        " ARRAY[coord1(skycell_point(10.0, 20.0)), coord2(skycell_point(10.0, 20.0)),"
+        " coord1(skycell_point(11.0, 20.0)), coord2(skycell_point(11.0, 20.0)),"
+        " coord1(skycell_point(11.0, 21.0)), coord2(skycell_point(11.0, 21.0))]"
+        " AS adql_polygon FROM t;"
     )
+    # a constructor inside an expression stays a geometry
+    assert sql("SELECT DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', 1, 2)) FROM t") == (
+        "SELECT distance(skycell_point(ra, dec), skycell_point(1.0, 2.0)) AS distance FROM t;"
+    )
+
+
+def test_a_selected_centroid_is_a_point_array():
+    assert sql(
+        "SELECT CENTROID(s_region_geom), obs_id FROM t WHERE COORD1(CENTROID(s_region_geom)) > 3"
+    ) == (
+        "SELECT ARRAY[coord1(centroid(s_region_geom)), coord2(centroid(s_region_geom))]"
+        " AS centroid, obs_id FROM t WHERE COORD1(CENTROID(s_region_geom)) > 3;"
+    )
+
+
+@pytest.mark.parametrize(
+    ("box", "vertices"),
+    [
+        # crossing RA 0: RA normalised into [0, 360)
+        ((0, 0, 2, 2), "359.0, -1.0, 1.0, -1.0, 1.0, 1.0, 359.0, 1.0"),
+        # past the north pole: Dec clamped, the polar corners merged into the pole
+        ((0, 89, 10, 6), "355.0, 86.0, 5.0, 86.0, 0.0, 90.0"),
+        ((180, -89, 10, 6), "180.0, -90.0, 185.0, -86.0, 175.0, -86.0"),
+    ],
+)
+def test_box_corners_are_on_the_sphere(box, vertices):
+    args = ", ".join(map(str, box))
+    translated = sql(
+        f"SELECT * FROM t WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), BOX('ICRS', {args}))"
+    )
+    polygon = translated.split("skycell_polygon(")[1].split(")")[0]
+    assert [round(float(v), 9) for v in polygon.split(",")] == [
+        float(v) for v in vertices.split(",")
+    ]
+
+
+@pytest.mark.parametrize("box", ["0, 0, 0, 1", "0, 0, 1, 0", "0, 0, 180, 1", "0, 120, 1, 2"])
+def test_a_box_with_no_convex_polygon_is_a_query_error(box):
+    with pytest.raises(QueryError):
+        sql(f"SELECT * FROM t WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), BOX('ICRS', {box}))")
 
 
 def test_geometry_columns_are_recorded():
@@ -226,12 +275,41 @@ def test_skyregion_polygon_either_winding_and_closing_vertex():
     [
         "POLYGON ICRS 0 0 2 0 1 0.2 2 2 0 2",  # a notch
         "POLYGON ICRS 0 0 2 2 2 0 0 2",  # self-crossing
-        "POLYGON ICRS 0 0 120 0 240 0",  # a great circle: a hemisphere
     ],
 )
 def test_skyregion_refuses_what_skycell_cannot_store(region):
     with pytest.raises(UnsupportedRegion, match="convex"):
         stcs_to_skyregion(region)
+
+
+@pytest.mark.parametrize(
+    ("region", "reason"),
+    [
+        ("POLYGON ICRS 10 20 11 20 10 20", "at least 3 distinct"),
+        ("POLYGON ICRS 10 20 11 20 10 20 11 21", "repeated"),
+        ("POLYGON ICRS 10 0 11 0 12 0", "one great circle"),
+        ("POLYGON ICRS 0 0 120 0 240 0", "one great circle"),
+    ],
+)
+def test_a_malformed_polygon_is_the_callers_mistake_not_a_null(region, reason):
+    # not UnsupportedRegion, which ingest stores as NULL: a usage error
+    with pytest.raises(ValueError, match=reason) as excinfo:
+        stcs_to_skyregion(region)
+    assert not isinstance(excinfo.value, UnsupportedRegion)
+
+
+def test_a_vertex_repeated_in_a_row_is_dropped_as_pg_sphere_stores_it():
+    assert stcs_to_skyregion("POLYGON ICRS 10 20 11 20 11 20 11 21") == (
+        stcs_to_skyregion("POLYGON ICRS 10 20 11 20 11 21")
+    )
+
+
+def test_a_circle_wider_than_a_hemisphere_passes_through():
+    # skycell holds a cap up to 180 degrees as one, and answers it the same
+    # with and without its index (checked against the database)
+    assert stcs_to_skyregion("CIRCLE ICRS 10 20 150") == (
+        "CIRCLE ICRS 10.000000000000 20.000000000000 150.000000000000"
+    )
 
 
 def test_skyregion_still_validates_like_the_spoly_conversion():
@@ -246,11 +324,13 @@ def test_an_unsupported_footprint_is_ingested_as_null(caplog):
     with caplog.at_level(logging.WARNING, logger="egernia_core"):
         assert ingest._derive(column, "POLYGON ICRS 0 0 2 0 1 0.2 2 2 0 2") is None
     assert "s_region_geom left NULL" in caplog.text
-    # anything malformed is still the caller's mistake
+    # anything malformed is still the caller's mistake, a degenerate polygon too
     from egernia_core.errors import UsageError
 
     with pytest.raises(UsageError):
         ingest._derive(column, "CIRCLE ICRS 10 95 1")
+    with pytest.raises(UsageError, match="at least 3 distinct"):
+        ingest._derive(column, "POLYGON ICRS 10 20 11 20 10 20")
 
 
 # -- schema --------------------------------------------------------------------
@@ -313,7 +393,7 @@ def test_obscore_position_index_is_the_generated_tables_one():
 def test_obscore_position_index_under_skycell(skycell):
     from egernia_api.plugins import obscore
 
-    # one definition (schema_gen.POSITION_INDEXES), formatted for ivoa.obscore
+    # one definition (geometry.py), formatted for ivoa.obscore
     assert position_index_name("obscore") == "obscore_skycell_cell"
     assert position_index_definition("ivoa.obscore") == (
         "ON ivoa.obscore (skycell_ang2cell(s_ra, s_dec))"
