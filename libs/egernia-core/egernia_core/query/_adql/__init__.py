@@ -4,8 +4,6 @@ See translator.py's module docstring for what changed and README.md for how
 to regenerate the parser from the grammar files.
 """
 
-# registers the skycell geometry backend with the translator
-from . import skycell  # noqa: F401
 from .ADQLLexer import ADQLLexer
 from .ADQLParser import ADQLParser
 from .ADQLParserListener import ADQLParserListener

@@ -26,7 +26,7 @@ from egernia_core.metadata.schema_gen import (
     position_index_statements,
 )
 from egernia_core.query._adql import ADQLQueryTranslator
-from egernia_core.query.adql import translate
+from egernia_core.query.adql import GEOMETRY_VISITORS, translate
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def skycell():
 
 
 def sql(adql: str) -> str:
-    return ADQLQueryTranslator(adql).to_postgresql(backend="skycell")
+    return ADQLQueryTranslator(adql).to_postgresql(*GEOMETRY_VISITORS["skycell"])
 
 
 # -- the setting ---------------------------------------------------------------
@@ -60,11 +60,9 @@ def test_backend_setting_refuses_anything_else(monkeypatch):
         _choose("TAP_GEOMETRY_BACKEND", "pgsphere", GEOMETRY_BACKENDS)
 
 
-def test_unknown_backend_is_a_query_error():
-    from queryparser.exceptions import QueryError
-
-    with pytest.raises(QueryError, match="unknown geometry backend"):
-        ADQLQueryTranslator("SELECT a FROM t").to_postgresql(backend="q3c")
+def test_every_backend_setting_has_its_visitors():
+    # the setting refuses anything else at startup, so this lookup cannot miss
+    assert set(GEOMETRY_VISITORS) == set(GEOMETRY_BACKENDS)
 
 
 # -- translation ---------------------------------------------------------------
@@ -146,7 +144,7 @@ def test_select_list_geometry_and_area():
 
 def test_geometry_columns_are_recorded():
     translator = ADQLQueryTranslator("SELECT * FROM t WHERE CONTAINS(pos, CIRCLE(centre, 0.1)) = 1")
-    assert translator.to_postgresql(backend="skycell") == (
+    assert translator.to_postgresql(*GEOMETRY_VISITORS["skycell"]) == (
         "SELECT * FROM t WHERE"
         " contains(pos, skycell_circle(coord1(centre), coord2(centre), 0.1)) = 1;"
     )

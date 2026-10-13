@@ -599,15 +599,6 @@ class FormatListener(ADQLParserListener):
         return '%s;' % query.rstrip()
 
 
-# The geometry and function visitors for each TAP_GEOMETRY_BACKEND. skycell.py
-# adds its own entry when the package is imported, so this module never
-# imports it (it builds on the visitors here).
-GEOMETRY_BACKENDS = {
-    'pgsphere': (ADQLGeometryTranslationVisitor,
-                 ADQLFunctionsTranslationVisitor),
-}
-
-
 class ADQLQueryTranslator(object):
     """
     The main translator object used to do the actual translation.
@@ -676,20 +667,18 @@ class ADQLQueryTranslator(object):
         self.walker.walk(format_listener, self.tree)
         return format_listener.format_query()
 
-    def to_postgresql(self, backend='pgsphere'):
+    def to_postgresql(self,
+                      geometry_cls=ADQLGeometryTranslationVisitor,
+                      functions_cls=ADQLFunctionsTranslationVisitor):
         """
-        Translate ADQL query to a PostgreSQL query, with the spherical
-        functions of the pg_sphere extension (``backend='pgsphere'``) or of
-        skycell (``backend='skycell'``, see skycell.py).
+        Translate ADQL query to a PostgreSQL query. The visitor classes
+        choose the spherical functions: pg_sphere's by default, or skycell's
+        (skycell.py; egernia_core.query.adql picks them by
+        TAP_GEOMETRY_BACKEND).
 
         """
         if self._query is None:
             raise QueryError('No query given.')
-
-        try:
-            geometry_cls, functions_cls = GEOMETRY_BACKENDS[backend]
-        except KeyError:
-            raise QueryError('unknown geometry backend: %s' % backend) from None
 
         self.parse()
 

@@ -34,8 +34,22 @@ from ._adql import (
     ADQLQueryTranslator,
     SyntaxErrorListener,
 )
+from ._adql.skycell import (
+    SkycellFunctionsTranslationVisitor,
+    SkycellGeometryTranslationVisitor,
+)
+from ._adql.translator import (
+    ADQLFunctionsTranslationVisitor,
+    ADQLGeometryTranslationVisitor,
+)
 
 log = logging.getLogger("egernia_core")
+
+#: The ADQL geometry and function visitors for each TAP_GEOMETRY_BACKEND.
+GEOMETRY_VISITORS = {
+    "pgsphere": (ADQLGeometryTranslationVisitor, ADQLFunctionsTranslationVisitor),
+    "skycell": (SkycellGeometryTranslationVisitor, SkycellFunctionsTranslationVisitor),
+}
 
 SUPPORTED_LANGUAGES = {"ADQL", "ADQL-2.0", "ADQL-2.1"}
 
@@ -184,7 +198,7 @@ def _translated(query: str, backend: str) -> Translation:
     _outcome.hit = False
     try:
         translator = _Translator(query)
-        sql = translator.to_postgresql(backend=backend)
+        sql = translator.to_postgresql(*GEOMETRY_VISITORS[backend])
     except QuerySyntaxError as exc:
         detail = "; ".join(str(e) for e in exc.syntax_errors) or str(exc)
         raise QueryParseError(f"ADQL syntax error: {detail}") from exc
