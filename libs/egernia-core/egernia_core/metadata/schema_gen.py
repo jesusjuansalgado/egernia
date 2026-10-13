@@ -476,14 +476,15 @@ def position_statistics_statements(qualified_index: str) -> list[str]:
     target = POSITION_INDEXES[settings.geometry_backend][2]
     if target is None:
         return []
-    return [
+    statement = (
         "DO $do$ BEGIN"
         " IF (SELECT attstattarget FROM pg_attribute"
         f" WHERE attrelid = '{qualified_index}'::regclass AND attnum = 1)"
         f" IS DISTINCT FROM {target} THEN"
         f" ALTER INDEX {qualified_index} ALTER COLUMN 1 SET STATISTICS {target};"
         " END IF; END $do$"
-    ]
+    )
+    return [statement]
 
 
 def position_index_statements(name: str, qualified: str) -> list[str]:

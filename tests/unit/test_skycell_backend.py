@@ -286,10 +286,12 @@ def test_position_index_is_the_skycell_cell_btree(skycell):
             " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec))"
         ),
         # only when the target is not 1000 already: no DDL on an unchanged bootstrap
-        "DO $do$ BEGIN IF (SELECT attstattarget FROM pg_attribute"
-        " WHERE attrelid = 'srcnet.data_products_skycell_cell'::regclass AND attnum = 1)"
-        " IS DISTINCT FROM 1000 THEN ALTER INDEX srcnet.data_products_skycell_cell"
-        " ALTER COLUMN 1 SET STATISTICS 1000; END IF; END $do$",
+        (
+            "DO $do$ BEGIN IF (SELECT attstattarget FROM pg_attribute"
+            " WHERE attrelid = 'srcnet.data_products_skycell_cell'::regclass AND attnum = 1)"
+            " IS DISTINCT FROM 1000 THEN ALTER INDEX srcnet.data_products_skycell_cell"
+            " ALTER COLUMN 1 SET STATISTICS 1000; END IF; END $do$"
+        ),
     ]
     ddl = ddl_statements(list(_skycell_tables().values()), "tap_reader")
     assert not any("spoint" in s for s in ddl)
