@@ -464,7 +464,8 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         try:
             if not _eval_number(bound) >= 0:
                 return None
-        except (ValueError, SyntaxError, TypeError, ZeroDivisionError):
+        except (ValueError, SyntaxError, TypeError, ZeroDivisionError,
+                OverflowError):
             return None
 
         left, right = self._distance_points(distance)

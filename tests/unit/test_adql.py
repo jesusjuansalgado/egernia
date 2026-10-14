@@ -778,6 +778,8 @@ def test_shapes_that_lower(predicate):
         # radius — the rewrite would turn rows into a query failure
         "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < sep_col",
         "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < -0.5",
+        # a bound too large for a float cannot become an scircle radius
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 1" + "0" * 400,
     ],
 )
 def test_shapes_that_are_left_alone(predicate):
