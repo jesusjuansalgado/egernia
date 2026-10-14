@@ -778,8 +778,13 @@ def test_shapes_that_lower(predicate):
         # radius — the rewrite would turn rows into a query failure
         "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < sep_col",
         "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < -0.5",
-        # a bound too large for a float cannot become an scircle radius
+        # pgsphere rejects an scircle radius above 90 degrees
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 91",
         "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 1" + "0" * 400,
+        # PostgreSQL computes -0.2 here (integer division truncates), not 0.3
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < -1.2 - (-3/2)",
+        # only decimal literals are evaluated
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0x10",
     ],
 )
 def test_shapes_that_are_left_alone(predicate):

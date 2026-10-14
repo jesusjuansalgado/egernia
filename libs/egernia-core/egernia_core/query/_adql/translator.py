@@ -37,6 +37,7 @@ dropped with the fork since this service never emits MySQL.
 """
 
 import ast
+import decimal
 import operator
 import re
 
@@ -419,7 +420,8 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         Lowered: `DISTANCE(p, q) < r`, `<= r`, and `r > DISTANCE(p, q)`,
         `r >= DISTANCE(p, q)`, for either DISTANCE spelling (two points or
         four coordinates) and any POINT arguments, when *r* is a constant
-        numeric expression that is not negative.
+        numeric expression between 0 and 90 degrees (pgsphere's scircle
+        limits).
 
         Left alone, deliberately: `>`, `>=`, `=`, `!=` and BETWEEN (a
         containment says nothing about being *outside* a circle, and an
@@ -461,11 +463,10 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
             op = '<' if op == '>' else '<='
 
         bound = bound_ctx.getText()
-        try:
-            if not _eval_number(bound) >= 0:
-                return None
-        except (ValueError, SyntaxError, TypeError, ZeroDivisionError,
-                OverflowError):
+        radius = _postgres_bound(bound)
+        # pgsphere rejects an scircle radius outside [0, 90] degrees, so a
+        # bound outside it would turn a query that ran into one that fails.
+        if radius is None or not 0 <= radius <= 90:
             return None
 
         left, right = self._distance_points(distance)
@@ -572,6 +573,50 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
             ctx_text = '%s && %s' % (left, right)
         _remove_children(ctx)
         self.contexts[ctx] = ctx_text
+
+
+_BOUND_TEXT = re.compile(r'[0-9.+\-*/()]+')
+
+
+def _postgres_bound(text):
+    """The value PostgreSQL gives a constant DISTANCE bound, or None.
+
+    The bound is emitted as written, so the range check has to see the
+    number PostgreSQL will compute, not the one Python would: decimal
+    literals are exact (numeric), and `/` between two integers truncates
+    toward zero, so `-1.2 - (-3/2)` is -0.2 there where Python says 0.3.
+    Only decimal literals, `+ - * /` and parentheses are understood;
+    anything else -- hex literals included -- is None, and stays unlowered.
+    """
+    if not _BOUND_TEXT.fullmatch(text):
+        return None
+
+    def _node(node):
+        # (value, is_integer) -- integer-ness decides how `/` behaves
+        if isinstance(node, ast.Constant) and not isinstance(node.value, bool):
+            literal = ast.get_source_segment(text, node)
+            value = decimal.Decimal(literal)
+            # PostgreSQL types an integer literal beyond bigint as numeric
+            return value, '.' not in literal and abs(value) < 2 ** 63
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _NUM_UNARYOPS:
+            value, is_int = _node(node.operand)
+            return _NUM_UNARYOPS[type(node.op)](value), is_int
+        if isinstance(node, ast.BinOp) and type(node.op) in (
+                ast.Add, ast.Sub, ast.Mult, ast.Div):
+            (a, a_int), (b, b_int) = _node(node.left), _node(node.right)
+            if isinstance(node.op, ast.Div):
+                if a_int and b_int:
+                    quotient = abs(a) // abs(b)
+                    return (quotient if (a < 0) == (b < 0) else -quotient), True
+                return a / b, False
+            return _NUM_BINOPS[type(node.op)](a, b), a_int and b_int
+        raise ValueError('not a constant bound')
+
+    try:
+        with decimal.localcontext(prec=60):
+            return _node(ast.parse(text, mode='eval').body)[0]
+    except (ValueError, SyntaxError, decimal.DecimalException):
+        return None
 
 
 def _sole_distance(ctx):
