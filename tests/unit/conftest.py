@@ -732,8 +732,15 @@ def stub_iam(monkeypatch, iam_keypair):
 
         return _Response()
 
+    # PyJWT >= 2.15 fetches the JWKS through its own no-redirect opener
+    # rather than urlopen, so the opener has to be stubbed too.
+    class _Opener:
+        def open(self, url, *args, **kwargs):
+            return patched_urlopen(url)
+
     monkeypatch.setattr(httpx, "get", patched_get)
     monkeypatch.setattr(urllib.request, "urlopen", patched_urlopen)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: _Opener())
 
     from egernia_core.auth import reset_verifier
 
