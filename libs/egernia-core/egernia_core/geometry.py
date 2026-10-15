@@ -98,8 +98,8 @@ SKYCELL = GeometryBackend(
     # density map skycell's coverings are costed from, so it gets a finer
     # statistics target. It also holds the position (INCLUDE): skycell then
     # tests the cone on each index entry and reads from the table only the
-    # rows inside it (skycell.index_filter); a skycell build without that
-    # setting uses the index as before
+    # rows inside it (skycell.index_filter, skycell 0.31); an earlier build
+    # uses the index as before
     position_index_suffix="skycell_cell",
     position_index_definition="(skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)",
     position_index_statistics=1000,

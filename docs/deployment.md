@@ -495,13 +495,17 @@ queries to fail one request at a time. `ivoa.obscore` rebuilds itself when
 its index definitions change.
 
 The `db` image installs pg_sphere always and skycell when built with a
-skycell branch or tag:
+skycell release tag, commit or branch. Use skycell 0.31 or later: from 0.31
+the cone scan tests cones on the position index's included `s_ra`/`s_dec`,
+which an earlier build ignores (it works, without that speed-up).
 
 ```bash
-# a commit (or a tag): the build is reproducible, and the commit is
+# a release tag (or a commit): the build is reproducible, and the commit is
 # recorded in the image at /usr/share/skycell/COMMIT
-SKYCELL_REF=<commit> TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
+SKYCELL_REF=v0.31 TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
 ```
+
+The extension's version is then `0.31` in `pg_available_extensions`.
 
 With Helm, set `config.geometryBackend: skycell` and use a tap-db image built
 with `SKYCELL_REF`.
