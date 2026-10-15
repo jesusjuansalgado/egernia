@@ -9,10 +9,9 @@ import time
 from collections.abc import Generator, Iterator
 from typing import Any, cast
 
-from egernia_core.config import settings
+from egernia_core.config import geometry_backend, settings
 from egernia_core.db import connection as db_connection
 from egernia_core.errors import UsageError
-from egernia_core.geometry import GEOMETRY_TYPES
 from egernia_core.metadata.schema_gen import REGION_SUFFIX
 from egernia_core.observability import QUERY_DURATION, tag_sql
 from egernia_core.query.adql import apply_maxrec, check_language, translate
@@ -166,7 +165,11 @@ def _published_tables(*, refresh: bool = False) -> frozenset[str]:
 
 @functools.cache
 def _column_is_geometry() -> dict[str, bool]:
-    """``schema.table.column`` -> whether PostgreSQL holds it as a geometry.
+    """``schema.table.column`` -> whether PostgreSQL holds it as a geometry
+    of the configured backend (geometry.py, geometry_types): the spatial
+    types INTERSECTS/CONTAINS translate for. TAP_SCHEMA cannot answer this,
+    because its VOTable datatype for spoly or skyregion is "char" -- the same
+    as the STC-S text a footprint is derived from.
 
     Read once and kept, rather than given the TTL and refresh-under-lock
     dance ``_published_tables`` needs, because the two go stale differently.
@@ -184,7 +187,7 @@ def _column_is_geometry() -> dict[str, bool]:
             " WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
         ).fetchall()
     return {
-        f"{schema}.{table}.{column}".lower(): udt in GEOMETRY_TYPES
+        f"{schema}.{table}.{column}".lower(): udt in geometry_backend().geometry_types
         for schema, table, column, udt in rows
     }
 

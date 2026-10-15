@@ -33,8 +33,10 @@ def _geometry_note() -> list[str]:
     )
     return [
         f"The tables are rendered for the `{backend.name}` geometry backend: each ",
-        f"`s_region_geom` footprint column is a `{backend.region_type}`, and it is {others} "
-        "instead (see [Deployment](deployment.md#geometry-backend-pg_sphere-or-skycell)).",
+        (
+            f"`s_region_geom` footprint column is a `{backend.region_type}`, and it is {others} "
+            "instead (see [Deployment](deployment.md#geometry-backend-pg_sphere-or-skycell))."
+        ),
         "",
     ]
 

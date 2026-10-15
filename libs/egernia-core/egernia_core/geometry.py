@@ -106,9 +106,3 @@ SKYCELL = GeometryBackend(
 )
 
 BACKENDS: dict[str, GeometryBackend] = {b.name: b for b in (PGSPHERE, SKYCELL)}
-
-#: Every type any backend holds a geometry in. A column of one of these is
-#: queryable with INTERSECTS/CONTAINS; TAP_SCHEMA cannot say so, because its
-#: VOTable datatype for spoly or skyregion is "char" -- the same as the STC-S
-#: text a footprint is derived from.
-GEOMETRY_TYPES = frozenset().union(*(b.geometry_types for b in BACKENDS.values()))

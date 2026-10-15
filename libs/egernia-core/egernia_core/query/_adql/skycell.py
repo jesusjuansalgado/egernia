@@ -9,12 +9,16 @@ translation is close to the identity:
   ``point``/``circle``/``polygon`` would otherwise win the name lookup --
   with coordinates in degrees, as written;
 - BOX becomes the polygon with corners at the centre plus and minus half the
-  width in RA and half the height in Dec: the coordinate range the pg_sphere
-  translation gives it (an ``sbox``), so a query means the same under either
-  backend. The polygon's Dec edges are great circles where the sbox's are
-  lines of constant Dec, so the two differ in slivers along them (a couple of
-  arcseconds for a 1-degree box at Dec -70). skycell's own ``box()`` reads the
-  width as an angle on the sky instead, which opens out in RA by 1/cos(dec);
+  width in RA and half the height in Dec. Its edges are great circles, as
+  ADQL 2.0 meant a BOX (a shortcut for a POLYGON, consistent with STC), where
+  pg_sphere's ``sbox`` keeps its Dec edges at constant Dec; ADQL 2.1
+  deprecates BOX for that ambiguity. So the backends agree only for small
+  boxes: they differ in slivers along the Dec edges (a couple of arcseconds
+  for a 1-degree box at Dec -70), and for a wide box by far more, as a great
+  circle bows towards the pole (the top edge of a 120-degree-wide box from
+  Dec 0 to 30 rises to Dec 49 at its middle). skycell's own ``box()`` reads
+  the width as an angle on the sky instead, which opens out in RA by
+  1/cos(dec);
 - CONTAINS and INTERSECTS stay the ADQL functions, compared with 1 or 0 as
   the query compares them. skycell plans ``contains(...) = 1`` as its
   indexed operator, whichever argument is the column and whichever way
@@ -168,14 +172,15 @@ class SkycellGeometryTranslationVisitor(ADQLGeometryTranslationVisitor):
 
 
 def _box_vertices(ra, dec, width, height):
-    """The skycell_polygon arguments for a BOX's coordinate range.
+    """The skycell_polygon arguments for a BOX: its corners, joined by great
+    circles (see the module docstring for how that differs from pg_sphere).
 
     RA is normalised into [0, 360) and Dec clamped to [-90, 90], so a box
     reaching past a pole means the cap of the RA range above (or below) its
     other edge -- the two corners that would both sit on the pole become the
     pole itself, which skycell needs (it refuses a repeated vertex). A box
-    with no area, or as wide as 180 degrees or more, has no convex polygon
-    that is its coordinate range, so it is refused.
+    with no area, as wide as 180 degrees or more, or reaching past both
+    poles (two corners left, which is no polygon) is refused.
     """
     if width <= 0 or height <= 0:
         raise QueryError("BOX needs a positive width and height")
@@ -188,6 +193,8 @@ def _box_vertices(ra, dec, width, height):
     lo_dec, hi_dec = max(dec - height / 2, -90.0), min(dec + height / 2, 90.0)
     if lo_dec >= hi_dec:
         raise QueryError("BOX has no area: its Dec range lies beyond a pole")
+    if lo_dec == -90.0 and hi_dec == 90.0:
+        raise QueryError("BOX reaching past both poles is not a polygon under the skycell backend")
     corners = [(lo_ra, lo_dec), (hi_ra, lo_dec), (hi_ra, hi_dec), (lo_ra, hi_dec)]
     if hi_dec == 90.0:
         corners[2:] = [(ra % 360, 90.0)]

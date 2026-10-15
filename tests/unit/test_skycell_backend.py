@@ -7,6 +7,7 @@ answers its own translation is a property of the database, checked against a
 real server.
 """
 
+import contextlib
 import logging
 import pathlib
 import sys
@@ -225,7 +226,16 @@ def test_box_corners_are_on_the_sphere(box, vertices):
     ]
 
 
-@pytest.mark.parametrize("box", ["0, 0, 0, 1", "0, 0, 1, 0", "0, 0, 180, 1", "0, 120, 1, 2"])
+@pytest.mark.parametrize(
+    "box",
+    [
+        "0, 0, 0, 1",  # no width
+        "0, 0, 1, 0",  # no height
+        "0, 0, 180, 1",  # 180 degrees wide
+        "0, 120, 1, 2",  # beyond a pole
+        "10, 0, 20, 200",  # past both poles: two corners, no polygon
+    ],
+)
 def test_a_box_with_no_convex_polygon_is_a_query_error(box):
     with pytest.raises(QueryError):
         sql(f"SELECT * FROM t WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), BOX('ICRS', {box}))")
@@ -511,3 +521,112 @@ def test_capabilities_under_pg_sphere_are_unchanged(client):
     body = client.get("/tap/capabilities").text
     assert "ADQL translated to PostgreSQL/pg_sphere" in body
     assert "<form>COORD1</form>" not in body
+
+
+# -- geometry support functions (pg_sphere) ------------------------------------
+
+
+def test_db_init_creates_the_same_support_functions():
+    """db/init and geometry.py hold one text, so a fresh database and the
+    bootstrap's catch-up create the same functions."""
+    from egernia_core.geometry import PGSPHERE
+
+    init = (pathlib.Path(__file__).resolve().parents[2] / "db/init/01_extensions.sql").read_text()
+    init = " ".join(init.split())
+    for function in PGSPHERE.support_functions:
+        definition = " ".join(function.definition.split())
+        assert definition.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1) in init
+
+
+class _SupportConn:
+    """A connection to a database with pg_sphere and none of its support
+    functions, whose CREATE FUNCTION raises ``refuse`` (if given)."""
+
+    def __init__(self, refuse=None, extension=True):
+        self.refuse, self.extension, self.sql = refuse, extension, []
+
+    def execute(self, sql, params=()):
+        self.sql.append(sql)
+        if sql.startswith("CREATE FUNCTION") and self.refuse is not None:
+            raise self.refuse
+        self.row = (1,) if "pg_extension" in sql and self.extension else None
+        if "to_regprocedure" in sql:
+            self.row = (None,)
+        return self
+
+    def fetchone(self):
+        return self.row
+
+    def transaction(self):
+        return contextlib.nullcontext()
+
+
+def test_support_functions_are_created_under_the_schema_lock():
+    from egernia_core import bootstrap
+
+    conn = _SupportConn()
+    bootstrap.ensure_geometry_functions(conn)
+    # the advisory lock the schema DDL takes, first: replicas do not race
+    assert conn.sql[0] == "SELECT pg_advisory_xact_lock(%s)"
+    assert sum(s.startswith("CREATE FUNCTION") for s in conn.sql) == 3
+
+
+def test_a_refused_support_function_is_a_warning_not_a_failed_start(caplog):
+    import psycopg
+    from egernia_core import bootstrap
+
+    conn = _SupportConn(refuse=psycopg.errors.InsufficientPrivilege("permission denied"))
+    with caplog.at_level(logging.WARNING, logger="egernia_core"):
+        bootstrap.ensure_geometry_functions(conn)  # no raise
+    assert "spoint_to_array_deg(spoint)" in caplog.text
+    assert "permission denied" in caplog.text
+
+
+def test_no_support_functions_without_the_extension():
+    from egernia_core import bootstrap
+
+    assert bootstrap.missing_geometry_functions(_SupportConn(extension=False)) == []
+
+
+def test_skycell_needs_no_support_functions(skycell):
+    from egernia_core import bootstrap
+
+    assert bootstrap.missing_geometry_functions(_SupportConn()) == []
+
+
+def test_readiness_warns_about_missing_support_functions(monkeypatch, caplog):
+    from egernia_core import bootstrap
+    from egernia_core.geometry import PGSPHERE
+
+    class Conn:
+        def execute(self, *_):
+            return self
+
+    monkeypatch.setattr(
+        bootstrap, "missing_geometry_functions", lambda conn: [PGSPHERE.support_functions[0]]
+    )
+    monkeypatch.setattr(ingest, "check_geometry_types", lambda conn, tables: None)
+    with caplog.at_level(logging.WARNING, logger="egernia_core"):
+        bootstrap.check_ready(Conn(), [])  # starts: a warning, as main behaves without them
+    assert "spoint_to_array_deg(spoint) are missing" in caplog.text
+
+
+def test_only_the_active_backends_types_are_geometries(monkeypatch):
+    from egernia_api.queries import query as query_module
+
+    class Conn:
+        def execute(self, *_):
+            return self
+
+        def fetchall(self):
+            return [("s", "t", "fp_spoly", "spoly"), ("s", "t", "fp_skyregion", "skyregion")]
+
+    monkeypatch.setattr(query_module, "db_connection", lambda: contextlib.nullcontext(Conn()))
+    query_module._column_is_geometry.cache_clear()
+    try:
+        assert query_module._column_is_geometry() == {
+            "s.t.fp_spoly": True,
+            "s.t.fp_skyregion": False,
+        }
+    finally:
+        query_module._column_is_geometry.cache_clear()

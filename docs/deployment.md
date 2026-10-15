@@ -505,14 +505,20 @@ with `SKYCELL_REF`.
 
 What differs under skycell:
 
-- An ADQL `BOX` means the same coordinate range as under pg_sphere. Its Dec
-  edges are great circles rather than lines of constant Dec, so the two
-  backends can disagree for points within a couple of arcseconds of those
-  edges.
-- skycell's polygons must be convex. A non-convex `s_region` POLYGON is
-  stored with a NULL `s_region_geom` (and a warning in the log) rather than
-  refused, so the document still ingests but that footprint answers no
-  geometry query. A CIRCLE footprint is stored as the exact circle rather than
+- An ADQL `BOX` is the polygon on its corners, with great-circle edges, as
+  ADQL 2.0 meant a BOX (a shortcut for a POLYGON); pg_sphere keeps a box's
+  Dec edges at constant Dec. The two agree for small boxes, apart from
+  slivers of a couple of arcseconds along the Dec edges, but not for wide
+  ones: a great circle bows towards the pole, so the top edge of a box
+  120 degrees wide from Dec 0 to 30 rises to Dec 49 at its middle. A box past
+  one pole ends at the pole; one with no area, 180 degrees or more wide, or
+  past both poles is refused. ADQL 2.1 deprecates `BOX`; prefer `POLYGON`.
+- skycell's polygons must be convex. A well-formed but non-convex
+  `s_region` POLYGON is stored with a NULL `s_region_geom` (and a warning in
+  the log) rather than refused, so the document still ingests but that
+  footprint answers no geometry query. A malformed one (fewer than three
+  distinct vertices, a vertex repeated in the ring, or no area) is refused,
+  as invalid STC-S is; a vertex repeated in a row is dropped. A CIRCLE footprint is stored as the exact circle rather than
   a 32-gon, and a POSITION as a circle of 50 milliarcseconds.
 - `COORD1`, `COORD2` and `CENTROID` work, and the capabilities document lists
   them.

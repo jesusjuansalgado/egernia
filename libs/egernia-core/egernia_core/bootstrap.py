@@ -17,10 +17,13 @@ command — when it is missing or outdated.
 import logging
 import time
 
+import psycopg
+
 from . import uws
 from .config import geometry_backend, settings
 from .db import close_pool
 from .db import connection as db_connection
+from .geometry import SupportFunction
 from .metadata import ingest
 from .metadata.plugins import MetadataPlugin
 
@@ -39,28 +42,54 @@ def bootstrap(conn, plugins: list[MetadataPlugin]) -> None:
         ingest.ensure_schema(conn, plugin)
 
 
-def ensure_geometry_functions(conn) -> None:
-    """Create the SQL functions the geometry backend's translation calls and
-    its extension does not define (geometry.py, support_functions).
-
-    Each is created only when missing, so a bootstrap of an unchanged
-    database issues no DDL; and only when the extension is installed -- a
-    deployment without it has no geometry to translate, and db/init lets it
-    start without one.
-    """
+def missing_geometry_functions(conn) -> list[SupportFunction]:
+    """The SQL functions the geometry backend's translation calls, its
+    extension does not define (geometry.py, support_functions), and this
+    database lacks. None while the extension itself is missing: there is no
+    geometry to translate for then, and db/init lets a database start so."""
     backend = geometry_backend()
     if not backend.support_functions:
-        return
+        return []
     installed = conn.execute(
         "SELECT 1 FROM pg_extension WHERE extname = %s", (backend.extension,)
     ).fetchone()
     if installed is None:
-        log.warning("%s is not installed: ADQL geometry functions will fail", backend.extension)
+        return []
+    return [
+        function
+        for function in backend.support_functions
+        if conn.execute("SELECT to_regprocedure(%s)", (function.signature,)).fetchone()[0] is None
+    ]
+
+
+def ensure_geometry_functions(conn) -> None:
+    """Create the missing support functions (db/init creates them on a fresh
+    database; this covers one that predates them).
+
+    Under the advisory lock the schema DDL takes, so replicas starting
+    together do not race to create them. In a savepoint, and a refusal --
+    most likely a role that may not create in the public schema, which
+    PostgreSQL 15 and later deny by default -- is a warning, not a failed
+    start: the service then behaves as before these functions existed, where
+    only a geometry in a select list fails.
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (ingest.ADVISORY_LOCK_KEY,))
+    missing = missing_geometry_functions(conn)
+    if not missing:
         return
-    for function in backend.support_functions:
-        exists = conn.execute("SELECT to_regprocedure(%s)", (function.signature,)).fetchone()[0]
-        if exists is None:
-            conn.execute(function.definition)
+    try:
+        with conn.transaction():
+            for function in missing:
+                conn.execute(function.definition)
+    except psycopg.Error as exc:
+        log.warning(
+            "geometry functions %s not created (%s): a POINT, CIRCLE or POLYGON in a select"
+            " list fails until they are; db/init/01_extensions.sql creates them, as does"
+            " `%s` run as a role that may create in the public schema",
+            ", ".join(f.signature for f in missing),
+            str(exc).strip(),
+            BOOTSTRAP_COMMAND,
+        )
 
 
 def ensure_tap_schema_self(conn) -> None:
@@ -133,6 +162,16 @@ def check_ready(conn, plugins: list[MetadataPlugin]) -> None:
     # fixed by running the bootstrap, and the error says what is
     for plugin in plugins:
         ingest.check_geometry_types(conn, plugin.tables)
+    # a database the bootstrap has not been re-run on since these functions
+    # were added: everything but a geometry in a select list works, as before
+    missing = missing_geometry_functions(conn)
+    if missing:
+        log.warning(
+            "geometry functions %s are missing: a POINT, CIRCLE or POLYGON in a select list"
+            " fails until `%s` is run against this database",
+            ", ".join(f.signature for f in missing),
+            BOOTSTRAP_COMMAND,
+        )
 
 
 def startup(plugins: list[MetadataPlugin], attempts: int = 5, delay_s: float = 2.0) -> None:
