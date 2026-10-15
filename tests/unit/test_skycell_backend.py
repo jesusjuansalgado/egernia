@@ -373,7 +373,7 @@ def test_position_index_is_the_skycell_cell_btree(skycell):
     assert position_index_statements("data_products", "srcnet.data_products") == [
         (
             "CREATE INDEX IF NOT EXISTS data_products_skycell_cell"
-            " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec))"
+            " ON srcnet.data_products (skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)"
         ),
         # only when the target is not 1000 already: no DDL on an unchanged bootstrap
         (
@@ -385,7 +385,10 @@ def test_position_index_is_the_skycell_cell_btree(skycell):
     ]
     ddl = ddl_statements(list(_skycell_tables().values()), "tap_reader")
     assert not any("spoint" in s for s in ddl)
-    assert any("srcnet.data_products (skycell_ang2cell(s_ra, s_dec))" in s for s in ddl)
+    assert any(
+        "srcnet.data_products (skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)" in s
+        for s in ddl
+    )
 
 
 def test_obscore_position_index_is_the_generated_tables_one():
@@ -406,13 +409,13 @@ def test_obscore_position_index_under_skycell(skycell):
     # one definition (geometry.py), formatted for ivoa.obscore
     assert position_index_name("obscore") == "obscore_skycell_cell"
     assert position_index_definition("ivoa.obscore") == (
-        "ON ivoa.obscore (skycell_ang2cell(s_ra, s_dec))"
+        "ON ivoa.obscore (skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)"
     )
     # read when used, so it follows the setting rather than the import
     assert obscore.position_index() == "obscore_skycell_cell"
     assert obscore.index_sql("obscore_skycell_cell", obscore.BUILD, "_build") == (
         "CREATE INDEX obscore_skycell_cell_build ON ivoa.obscore_build"
-        " (skycell_ang2cell(s_ra, s_dec))"
+        " (skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)"
     )
 
 

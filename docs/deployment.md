@@ -475,9 +475,12 @@ SQL for one PostgreSQL extension, chosen by `TAP_GEOMETRY_BACKEND`:
   its operators, with GiST indexes.
 - **`skycell`**: [skycell](https://github.com/jesusjuansalgado/skycell), whose
   functions carry ADQL's own names. Positions are indexed by a B-tree on their
-  HEALPix cell (`skycell_ang2cell(s_ra, s_dec)`), and skycell plans every
-  ADQL spelling of a cone or a cross-match through it: `CONTAINS(POINT,
+  HEALPix cell that also holds the position
+  (`(skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)`), and skycell plans
+  every ADQL spelling of a cone or a cross-match through it: `CONTAINS(POINT,
   CIRCLE)` with the point or the circle on either side, and `DISTANCE(…) < r`.
+  The included position lets skycell test the cone on the index entry and read
+  from the table only the rows inside it.
   Footprints are stored as skycell `skyregion` values with a GiST index.
 
 The choice reaches further than the translation. The `s_region_geom`

@@ -96,9 +96,12 @@ SKYCELL = GeometryBackend(
     # a B-tree on the position's HEALPix cell, which skycell plans every ADQL
     # spelling of a cone or a cross-match through; its histogram is the
     # density map skycell's coverings are costed from, so it gets a finer
-    # statistics target
+    # statistics target. It also holds the position (INCLUDE): skycell then
+    # tests the cone on each index entry and reads from the table only the
+    # rows inside it (skycell.index_filter); a skycell build without that
+    # setting uses the index as before
     position_index_suffix="skycell_cell",
-    position_index_definition="(skycell_ang2cell(s_ra, s_dec))",
+    position_index_definition="(skycell_ang2cell(s_ra, s_dec)) INCLUDE (s_ra, s_dec)",
     position_index_statistics=1000,
     geometry_types=frozenset({"skypos", "skyregion"}),
     # COORD1, COORD2 and CENTROID pass through to skycell's own functions
