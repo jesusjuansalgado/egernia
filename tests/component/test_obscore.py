@@ -176,6 +176,21 @@ _ONLY_BITMAP_SCANS = (
 )
 
 
+def test_a_distance_cone_can_use_the_position_index(tap_service, database_url):
+    """DISTANCE(POINT, POINT) < r is a cone. Compared as a float, as it was
+    translated before, no index could serve it, and every such query scanned
+    the relation. With sequential scans switched off, what the plan can
+    still do shows whether the position index applies."""
+    from egernia_core.query.adql import adql_to_postgresql
+
+    sql = adql_to_postgresql(
+        "SELECT obs_id FROM ivoa.obscore"
+        " WHERE DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 62.3, -65.5)) < 1.0"
+    ).rstrip(";")
+    plan = _plan(database_url, sql, "SET enable_seqscan = off")
+    assert "obscore_spoint_gist" in plan, plan
+
+
 def test_a_did_lookup_can_use_the_trigram_index(tap_service, api_url, database_url):
     """A leading-wildcard LIKE on obs_publisher_did used to evaluate the
     five-way DID expression for every product. The DID is a stored column of

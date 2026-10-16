@@ -45,6 +45,22 @@ def test_sync_geometry_cone_search(tap_service):
     assert all(name.startswith("SKA-CS J04") for name in table["source_name"])
 
 
+def test_sync_distance_cone_finds_what_the_contains_cone_finds(tap_service):
+    svc = pyvo.dal.TAPService(tap_service)
+    contains = svc.search(
+        "SELECT source_name FROM ska.continuum_sources "
+        "WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 62.3, -65.5, 1.0))"
+    ).to_table()
+    for condition in (
+        "DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', 62.3, -65.5)) < 1.0",
+        "1.0 >= DISTANCE(POINT('ICRS', 62.3, -65.5), POINT('ICRS', ra, dec))",
+    ):
+        distance = svc.search(
+            f"SELECT source_name FROM ska.continuum_sources WHERE {condition}"
+        ).to_table()
+        assert sorted(distance["source_name"]) == sorted(contains["source_name"])
+
+
 def test_tap_schema_queryable_via_adql(tap_service):
     svc = pyvo.dal.TAPService(tap_service)
     tables = svc.search("SELECT table_name FROM tap_schema.tables").to_table()

@@ -27,6 +27,10 @@ Changes against upstream, all ADQL 2.1:
   powers instead of XOR);
 - hexadecimal literals render in decimal, which every PostgreSQL version
   accepts (bare ``0x…`` needs 16+);
+- an upper bound on a DISTANCE (``DISTANCE(p, q) < r`` and its spellings)
+  also gets the containment ``p @ scircle(q, RADIANS(r))``, which pg_sphere's
+  GiST index serves -- upstream's float comparison over ``<->`` alone scans
+  the whole table for every such cone and cross-match;
 - geometry-coordinate expressions are evaluated by a numeric-only parser
   (``_eval_number``) instead of upstream's ``eval()`` — the raw ``eval``
   ran arbitrary Python from the query string (e.g. a coordinate slot of
@@ -325,6 +329,9 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
         self.conunits = conunits
         # See ADQLGeometryTranslationVisitor.geometry_columns.
         self.geometry_columns = set()
+        # The two point arguments of each DISTANCE, by its context, for
+        # visitComparison_predicate's index rewrite.
+        self._distance_points = {}
 
     def _geometry_argument(self, gve_ctx):
         """The SQL for one geometry_value_expression argument.
@@ -407,6 +414,7 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
                    f"spoint(RADIANS({_convert_values(ctx, 6)[0]}), " +
                           f"RADIANS({_convert_values(ctx, 8)[0]}))")
 
+        self._distance_points[ctx] = arg
         ctx_text = '%s(%s <-> %s)' % ((self.conunits, ) + arg)
         derived_column = _get_ancestor_class_node(
             ctx, ADQLParser.Derived_columnContext, depth=9)
@@ -433,6 +441,60 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
                          'defined points or point columns. For instance, '
                          'DISTANCE(POINT(t.ra, t.dec), POINT(0.0, 0.0)) '
                          'or DISTANCE(t.ra, t.dec, 0.0, 0.0)')
+
+    def visitComparison_predicate(self, ctx):
+        """`DISTANCE(p, q) < r` as a cone pg_sphere's GiST index can serve.
+
+        The distance compared with a radius is a float comparison over a
+        computed angle, which no index serves: every such cone, and every
+        cross-match written this way, scans the whole table. When the
+        distance is bounded from above by a constant radius pg_sphere's
+        circles accept (0 to 90 degrees), the comparison becomes
+
+            (p @ scircle(q, RADIANS(r)) AND <the comparison as before>)
+
+        -- the containment for the index, the original comparison as the
+        exact test, so the rows are the same: `@` includes the circle's
+        boundary, which `<` excludes, and the recheck decides. Each point
+        that is not a constant gets its own containment, so a cross-match
+        between two tables can be driven from either table's index; the
+        translation cannot know which table is the large one, and the
+        planner can. Anything else -- a lower bound, a radius that is not a
+        constant in range, two constant points -- keeps its translation.
+        """
+        self.visitChildren(ctx)
+        left, op, right = ctx.children
+        sign = op.getText()
+        if sign in ('<', '<='):
+            distance, radius = _sole_distance(left), right
+        elif sign in ('>', '>='):
+            distance, radius = _sole_distance(right), left
+        else:
+            return
+        points = self._distance_points.get(distance)
+        if points is None:
+            return
+        try:
+            r = _eval_number(radius.getText())
+        except (ValueError, SyntaxError, TypeError, ZeroDivisionError):
+            return
+        if not 0 <= r <= 90:
+            return
+        containments = [
+            '%s @ scircle(%s, RADIANS(%r))' % (point, centre, r)
+            for point, centre in (points, points[::-1])
+            if not _is_constant_point(point)
+        ]
+        if not containments:
+            return
+        exact = _sql_of(ctx, self.contexts)
+        ctx_text = '(%s)' % ' AND '.join(containments + [exact])
+        # One terminal is left under the predicate, so the formatter emits
+        # its translation in place of the whole comparison.
+        terminal = op.getChild(0)
+        terminal.parentCtx = ctx
+        ctx.children = [terminal]
+        self.contexts[ctx] = ctx_text
 
     def visitIntersects_predicate(self, ctx):
         comp_value_l = ctx.children[0].getText()
@@ -481,6 +543,38 @@ class ADQLFunctionsTranslationVisitor(ADQLParserVisitor):
 def _is_point(sql):
     """Whether this translated geometry argument is a POINT constructor."""
     return sql.lstrip().startswith('spoint(')
+
+
+def _sole_distance(value_ctx):
+    """The DISTANCE this side of a comparison consists of, or None.
+
+    Follows the chain of single-child rules down from a value expression;
+    a side with anything else in it (`DISTANCE(...) * 2`, a sum) is not a
+    distance alone, and keeps its translation.
+    """
+    node = value_ctx
+    while not isinstance(node, ADQLParser.DistanceContext):
+        if node.getChildCount() != 1 or isinstance(node, antlr4.TerminalNode):
+            return None
+        node = node.getChild(0)
+    return node
+
+
+_NUMBER = re.compile(r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?')
+
+
+def _is_constant_point(sql):
+    """Whether a translated point argument holds no column: an spoint of
+    numbers, which no index on the table can serve."""
+    rest = _NUMBER.sub(' ', re.sub(r'\b(?:spoint|RADIANS)\b', ' ', sql))
+    return re.search(r'[A-Za-z_]', rest) is None
+
+
+def _sql_of(ctx, contexts):
+    """The SQL the formatter writes for a subtree, as translated so far."""
+    listener = FormatListener(None, contexts, {})
+    antlr4.ParseTreeWalker().walk(listener, ctx)
+    return listener.format_query().rstrip(';')
 
 
 def _negate_intersects(sql):

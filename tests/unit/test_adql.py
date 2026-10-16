@@ -318,6 +318,105 @@ def test_distance_between_point_columns():
     assert "DEGREES(p1 <-> p2)" in sql
 
 
+# DISTANCE(p, q) < r is a cone. Compared as a float, no index serves it, so
+# an upper-bounded comparison gains the containment pg_sphere's GiST index
+# does serve, ahead of the comparison it had, which stays as the exact test.
+
+_P = "spoint(RADIANS(s_ra), RADIANS(s_dec))"
+_C = "spoint(RADIANS(10.0), RADIANS(20.0))"
+
+
+def test_a_distance_cone_gains_the_indexable_containment():
+    sql = adql_to_postgresql(
+        "SELECT obs_id FROM ivoa.obscore"
+        " WHERE DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.2"
+    )
+    expected = f"WHERE ({_P} @ scircle({_C}, RADIANS(0.2)) AND DEGREES({_P} <-> {_C}) < 0.2)"
+    assert expected in sql
+
+
+@pytest.mark.parametrize(
+    ("condition", "exact"),
+    [
+        (
+            "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) <= 0.2",
+            f"DEGREES({_P} <-> {_C}) <= 0.2",
+        ),
+        (
+            "0.2 > DISTANCE(POINT('ICRS', 10, 20), POINT('ICRS', s_ra, s_dec))",
+            f"0.2 > DEGREES({_C} <-> {_P})",
+        ),
+        ("DISTANCE(s_ra, s_dec, 10, 20) < 0.2", f"DEGREES({_P} <-> {_C}) < 0.2"),
+        (
+            "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.1 * 2",
+            f"DEGREES({_P} <-> {_C}) < 0.1 * 2",
+        ),
+    ],
+)
+def test_every_spelling_of_a_distance_cone_gains_it(condition, exact):
+    # <=, the reversed comparison, ADQL 2.1's four-argument DISTANCE and a
+    # constant radius expression; the comparison itself is kept as written
+    sql = adql_to_postgresql(f"SELECT obs_id FROM ivoa.obscore WHERE {condition}")
+    assert f"({_P} @ scircle({_C}, RADIANS(0.2)) AND {exact})" in sql
+
+
+def test_a_distance_cross_match_can_be_driven_from_either_table():
+    """Which side is the large table is the planner's to know, so each
+    column point gets its containment and either index can drive the join."""
+    sql = adql_to_postgresql(
+        "SELECT u.id, o.obs_id FROM TAP_UPLOAD.src AS u JOIN ivoa.obscore AS o"
+        " ON DISTANCE(POINT('ICRS', o.s_ra, o.s_dec), POINT('ICRS', u.ra, u.dec)) < 0.05"
+    )
+    o = "spoint(RADIANS(o.s_ra), RADIANS(o.s_dec))"
+    u = "spoint(RADIANS(u.ra), RADIANS(u.dec))"
+    assert (
+        f"ON ({o} @ scircle({u}, RADIANS(0.05)) AND {u} @ scircle({o}, RADIANS(0.05))"
+        f" AND DEGREES({o} <-> {u}) < 0.05)"
+    ) in sql
+
+
+def test_the_rewritten_cone_stays_one_term_under_not_and_or():
+    negated = adql_to_postgresql(
+        "SELECT obs_id FROM ivoa.obscore"
+        " WHERE NOT DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.2"
+    )
+    assert f"WHERE NOT ({_P} @ scircle(" in negated
+    either = adql_to_postgresql(
+        "SELECT obs_id FROM ivoa.obscore WHERE calib_level = 2"
+        " OR DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 0.2 AND t_min > 1"
+    )
+    assert f"calib_level = 2 OR ({_P} @ scircle(" in either
+    assert "< 0.2) AND t_min > 1" in either
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        # a lower bound: outside a circle, not a cone
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) > 0.2",
+        # pg_sphere's circles stop at 90 degrees
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < 120",
+        # a radius that is not a constant
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) < s_fov",
+        # the distance is not one side on its own
+        "DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) * 2 < 0.2",
+        # no column for an index to serve
+        "DISTANCE(POINT('ICRS', 1, 2), POINT('ICRS', 10, 20)) < 0.2",
+    ],
+)
+def test_other_distance_comparisons_keep_their_translation(condition):
+    sql = adql_to_postgresql(f"SELECT obs_id FROM ivoa.obscore WHERE {condition}")
+    assert "@ scircle" not in sql
+    assert "WHERE DEGREES(" in sql
+
+
+def test_distance_in_the_select_list_is_unchanged():
+    sql = adql_to_postgresql(
+        "SELECT DISTANCE(POINT('ICRS', s_ra, s_dec), POINT('ICRS', 10, 20)) FROM ivoa.obscore"
+    )
+    assert f"SELECT DEGREES({_P} <-> {_C}) AS distance FROM" in sql
+
+
 def test_point_column_as_circle_center():
     sql = adql_to_postgresql("SELECT 1 FROM t WHERE 1=CONTAINS(pt_col, CIRCLE(center_col, 0.5))")
     assert "pt_col @ scircle(center_col, RADIANS(0.5))" in sql
