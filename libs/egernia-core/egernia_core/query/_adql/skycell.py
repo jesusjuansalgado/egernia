@@ -209,6 +209,13 @@ class SkycellFunctionsTranslationVisitor(ADQLFunctionsTranslationVisitor):
     def __init__(self, contexts):
         super().__init__(contexts, conunits="")
 
+    def _lower_distance(self, ctx):
+        # The pg_sphere translation rewrites `DISTANCE(p, q) < r` into the
+        # `@ scircle` containment its GiST index serves. skycell plans the
+        # comparison itself as the indexed cone (see the module docstring),
+        # and scircle is pg_sphere's: the comparison stays as written.
+        return None
+
     def visitArea(self, ctx):
         arg = self._geometry_argument(ctx.children[2])
         ctx_text = _aliased(f"area({arg})", _select_item(ctx, 9), "adql_area")

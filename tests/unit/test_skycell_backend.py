@@ -175,6 +175,17 @@ def test_distance_both_forms_in_degrees():
     )
 
 
+def test_distance_bounds_are_not_lowered_to_pgsphere_containment():
+    # The pg_sphere translation rewrites these into `@ scircle(...)`;
+    # skycell indexes the comparison as written.
+    assert sql(
+        "SELECT * FROM t WHERE 0.1 > DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', 1, 2))"
+    ) == ("SELECT * FROM t WHERE 0.1 > distance(skycell_point(ra, dec), skycell_point(1.0, 2.0));")
+    assert sql("SELECT * FROM t WHERE DISTANCE(ra, dec, 1, 2) <= 0.1") == (
+        "SELECT * FROM t WHERE distance(ra, dec, 1.0, 2.0) <= 0.1;"
+    )
+
+
 def test_select_list_geometry_is_an_array_of_doubles_in_degrees():
     # the shape the pg_sphere translation returns (spoint_to_array_deg and
     # friends, geometry.py): [ra, dec], [ra, dec, radius], [ra1, dec1, ...]
