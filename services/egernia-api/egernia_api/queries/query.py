@@ -9,7 +9,7 @@ import time
 from collections.abc import Generator, Iterator
 from typing import Any, cast
 
-from egernia_core.config import settings
+from egernia_core.config import geometry_backend, settings
 from egernia_core.db import connection as db_connection
 from egernia_core.errors import UsageError
 from egernia_core.metadata.schema_gen import REGION_SUFFIX
@@ -67,7 +67,8 @@ def prepare_query(params: dict[str, str]) -> dict:
 
     # Geometry slots accept any bare identifier during translation, which is
     # pure and consults no schema. A text column reaching PostgreSQL there
-    # fails as `operator does not exist: text && scircle` — a server-fault
+    # fails as `operator does not exist: text && scircle` (or, under skycell,
+    # `function intersects(text, skyregion) does not exist`) — a server-fault
     # shape for a usage error, naming neither the column at fault nor the one
     # to use. Refused here instead, where the column metadata already is.
     _reject_text_geometry(translation.geometry_columns, tables, upload_names)
@@ -162,16 +163,13 @@ def _published_tables(*, refresh: bool = False) -> frozenset[str]:
         return tables
 
 
-# pgsphere's spatial types. A column is queryable with INTERSECTS/CONTAINS
-# exactly when PostgreSQL holds it as one of these; TAP_SCHEMA cannot answer
-# this, because its VOTable datatype for spoly is "char" — the same as the
-# STC-S text the footprint was derived from.
-_GEOMETRY_TYPES = frozenset({"spoly", "spoint", "scircle", "sbox", "spath", "sline"})
-
-
 @functools.cache
 def _column_is_geometry() -> dict[str, bool]:
-    """``schema.table.column`` -> whether PostgreSQL holds it as a geometry.
+    """``schema.table.column`` -> whether PostgreSQL holds it as a geometry
+    of the configured backend (geometry.py, geometry_types): the spatial
+    types INTERSECTS/CONTAINS translate for. TAP_SCHEMA cannot answer this,
+    because its VOTable datatype for spoly or skyregion is "char" -- the same
+    as the STC-S text a footprint is derived from.
 
     Read once and kept, rather than given the TTL and refresh-under-lock
     dance ``_published_tables`` needs, because the two go stale differently.
@@ -189,7 +187,7 @@ def _column_is_geometry() -> dict[str, bool]:
             " WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
         ).fetchall()
     return {
-        f"{schema}.{table}.{column}".lower(): udt in _GEOMETRY_TYPES
+        f"{schema}.{table}.{column}".lower(): udt in geometry_backend().geometry_types
         for schema, table, column, udt in rows
     }
 
@@ -231,7 +229,7 @@ def _reject_text_geometry(
             # one column and absent under the other. Answering a different
             # query than the one asked would drop those rows silently.
             message += (
-                f". Use {alternative}, the pgsphere footprint derived from it at"
+                f". Use {alternative}, the footprint geometry derived from it at"
                 f" ingestion — note it is NULL wherever {bare} could not be converted"
             )
         raise UsageError(message)
