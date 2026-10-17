@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 import httpx
 import pytest
 import pyvo
+from egernia_core.config import GEOMETRY_BACKENDS, _choose
 
 pytestmark = pytest.mark.component
 
@@ -155,6 +156,12 @@ def test_sync_errors_are_dali_votables(tap_service, params):
 _CONE = (
     "SELECT TOP 1 source_name FROM ska.continuum_sources WHERE 1=CONTAINS(POINT('ICRS', ra, dec), "
 )
+# pg_sphere's limits; skycell draws circles up to 180 degrees and answers
+# these. The backend is read as the services read it.
+_PGSPHERE_ONLY = pytest.mark.skipif(
+    _choose("TAP_GEOMETRY_BACKEND", "pgsphere", GEOMETRY_BACKENDS) != "pgsphere",
+    reason="pg_sphere's circle radius limit",
+)
 
 
 @pytest.mark.parametrize(
@@ -164,9 +171,19 @@ _CONE = (
         # the CSV path is PostgreSQL's COPY, which fails differently
         ("SELECT TOP 1 1/0 FROM ska.continuum_sources", "csv", "division by zero"),
         # a constant radius pg_sphere cannot draw: refused at translation
-        (_CONE + "CIRCLE('ICRS', 62.3, -65.5, 120))", "votable", "between 0 and 90 degrees"),
+        pytest.param(
+            _CONE + "CIRCLE('ICRS', 62.3, -65.5, 120))",
+            "votable",
+            "between 0 and 90 degrees",
+            marks=_PGSPHERE_ONLY,
+        ),
         # one computed per row: refused by pg_sphere as the query runs
-        (_CONE + "CIRCLE('ICRS', 62.3, -65.5, ra * 10))", "votable", "radius must not be greater"),
+        pytest.param(
+            _CONE + "CIRCLE('ICRS', 62.3, -65.5, ra * 10))",
+            "votable",
+            "radius must not be greater",
+            marks=_PGSPHERE_ONLY,
+        ),
     ],
 )
 def test_sync_query_the_database_refuses_is_a_dali_error(tap_service, query, fmt, says):

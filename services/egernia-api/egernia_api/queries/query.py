@@ -9,6 +9,7 @@ import time
 from collections.abc import Generator, Iterator
 from typing import Any, cast
 
+import psycopg
 from egernia_core.config import geometry_backend, settings
 from egernia_core.db import connection as db_connection
 from egernia_core.errors import UsageError
