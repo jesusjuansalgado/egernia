@@ -45,6 +45,21 @@ def test_sync_geometry_cone_search(tap_service):
     assert all(name.startswith("SKA-CS J04") for name in table["source_name"])
 
 
+def test_select_list_geometry_is_an_array_in_degrees(tap_service):
+    """A geometry in the select list comes back as its DALI double array in
+    degrees, under either geometry backend: [ra, dec] for a POINT, [ra, dec,
+    radius] for a CIRCLE, the vertices in order for a POLYGON."""
+    svc = pyvo.dal.TAPService(tap_service)
+    table = svc.search(
+        "SELECT TOP 1 POINT('ICRS', 10, 20), CIRCLE('ICRS', 10, 20, 1) AS c,"
+        " POLYGON('ICRS', 10, 20, 11, 20, 11, 21) FROM ska.continuum_sources"
+    ).to_table()
+    assert table.colnames == ["adql_point", "c", "adql_polygon"]
+    assert str(table["adql_point"][0]) == "[10.0, 20.0]"
+    assert str(table["c"][0]) == "[10.0, 20.0, 1.0]"
+    assert str(table["adql_polygon"][0]) == "[10.0, 20.0, 11.0, 20.0, 11.0, 21.0]"
+
+
 def test_tap_schema_queryable_via_adql(tap_service):
     svc = pyvo.dal.TAPService(tap_service)
     tables = svc.search("SELECT table_name FROM tap_schema.tables").to_table()
