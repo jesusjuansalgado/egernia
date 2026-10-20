@@ -529,6 +529,23 @@ What differs under skycell:
   a 32-gon, and a POSITION as a circle of 50 milliarcseconds.
 - `COORD1`, `COORD2` and `CENTROID` work, and the capabilities document lists
   them.
+- skycell's astrometry functions, under the names of the IVOA catalogue of
+  ADQL user-defined functions, are declared in the capabilities
+  (`features-udf`, with their units): `ivo_epoch_prop` and
+  `ivo_epoch_prop_pos` (rigorous epoch propagation, ESA SP-1200 1.5.5),
+  `ivo_healpix_index` and `ivo_healpix_center` (NESTED). A function that
+  returns a position is a POINT wherever ADQL takes one — in `CONTAINS`,
+  `INTERSECTS`, `DISTANCE` or as a `CIRCLE` centre — and `[ra, dec]` in the
+  select list. A propagated position cannot use the position index, so write
+  a proper-motion search as an indexed cone widened by the largest motion of
+  interest, and the propagated test beside it:
+
+  ```sql
+  SELECT * FROM cat
+  WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 269.45, 4.69, 0.05 + 0.006))
+    AND 1 = CONTAINS(ivo_epoch_prop_pos(ra, dec, plx, pmra, pmdec, rv, 2016, 2026),
+                     CIRCLE('ICRS', 269.45, 4.69, 0.05))
+  ```
 - skycell defines INTERSECTS between a point and a region only that way
   round. A `POINT(...)` written second is moved first in translation (ADQL's
   INTERSECTS is symmetric), but a point-typed column (ADQL 2.1) is not

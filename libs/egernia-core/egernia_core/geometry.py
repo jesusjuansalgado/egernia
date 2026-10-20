@@ -7,8 +7,9 @@ query/_adql/skycell.py). Everything else that differs between the two is
 described here, and the modules that need it read it from the backend in
 use: the footprint column's type and how it is derived from STC-S, the
 position index, the PostgreSQL types that count as geometries, the ADQL
-geometry functions the capabilities list, and the SQL functions the
-translation relies on that the extension itself does not define. The ADQL
+geometry functions and user-defined functions the capabilities list, and
+the SQL functions the translation relies on that the extension itself does
+not define. The ADQL
 visitors are the one per-backend piece kept beside the translator
 (query/adql.py, GEOMETRY_VISITORS), which checks it covers these.
 """
@@ -28,6 +29,25 @@ class SupportFunction:
 
 
 @dataclass(frozen=True)
+class UserFunction:
+    """An ADQL user-defined function the extension provides under its IVOA
+    name, declared in the capabilities (TAPRegExt features-udf)."""
+
+    form: str  # the TAPRegExt signature: ``name(arg TYPE, ...) -> TYPE``
+    description: str
+
+    @property
+    def name(self) -> str:
+        return self.form.split("(", 1)[0].strip().lower()
+
+    @property
+    def returns_point(self) -> bool:
+        """A position: usable where ADQL takes a POINT, and an [ra, dec]
+        array in the select list, as a POINT is."""
+        return self.form.rsplit("->", 1)[1].strip() == "POINT"
+
+
+@dataclass(frozen=True)
 class GeometryBackend:
     name: str  # the TAP_GEOMETRY_BACKEND value
     extension: str  # the PostgreSQL extension, as the capabilities name it
@@ -44,6 +64,12 @@ class GeometryBackend:
     # the ADQL geometry functions the translation supports (TAPRegExt forms)
     adql_geometry_forms: tuple[str, ...]
     support_functions: tuple[SupportFunction, ...] = ()
+    # the IVOA user-defined functions the extension implements
+    user_functions: tuple[UserFunction, ...] = ()
+
+    def position_functions(self) -> frozenset[str]:
+        """The (lower-case) names of the user functions that return a POINT."""
+        return frozenset(f.name for f in self.user_functions if f.returns_point)
 
 
 _ADQL_GEOMETRY = ("AREA", "BOX", "CIRCLE", "CONTAINS", "DISTANCE", "INTERSECTS", "POINT", "POLYGON")
@@ -106,6 +132,49 @@ SKYCELL = GeometryBackend(
     geometry_types=frozenset({"skypos", "skyregion"}),
     # COORD1, COORD2 and CENTROID pass through to skycell's own functions
     adql_geometry_forms=tuple(sorted((*_ADQL_GEOMETRY, "CENTROID", "COORD1", "COORD2"))),
+    # skycell's astrometry functions, under the names (and forms) of the IVOA
+    # catalogue of ADQL user-defined functions, as DaCHS declares them. Not
+    # declared: skycell's ivo_apply_pm -- DaCHS's is gavo_apply_pm, in
+    # degrees/yr, where skycell's takes mas/yr -- and skycell's frame
+    # conversions (icrs2gal and kin; the catalogue's is ivo_geom_transform).
+    user_functions=(
+        UserFunction(
+            "ivo_epoch_prop(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
+            " parallax DOUBLE PRECISION, pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION,"
+            " radial_velocity DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
+            " out_epoch DOUBLE PRECISION) -> DOUBLE PRECISION[6]",
+            "The astrometric parameters propagated rigorously (ESA SP-1200, 1.5.5)"
+            " from ref_epoch to out_epoch: [ra, dec, parallax, pmra, pmdec,"
+            " radial_velocity]. Degrees, mas, mas/yr (pmra including cos(dec)),"
+            " km/s; epochs in Julian years.",
+        ),
+        UserFunction(
+            "ivo_epoch_prop_pos(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
+            " parallax DOUBLE PRECISION, pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION,"
+            " radial_velocity DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
+            " out_epoch DOUBLE PRECISION) -> POINT",
+            "The position of ivo_epoch_prop, as a POINT.",
+        ),
+        UserFunction(
+            "ivo_epoch_prop_pos(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
+            " pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
+            " out_epoch DOUBLE PRECISION) -> POINT",
+            "ivo_epoch_prop_pos without parallax and radial velocity: the proper"
+            " motion alone, along the great circle.",
+        ),
+        UserFunction(
+            "ivo_healpix_index(order INTEGER, ra DOUBLE PRECISION, dec DOUBLE PRECISION) -> BIGINT",
+            "The index of the NESTED HEALPix cell of order order containing (ra, dec).",
+        ),
+        UserFunction(
+            "ivo_healpix_index(order INTEGER, p POINT) -> BIGINT",
+            "The index of the NESTED HEALPix cell of order order containing p.",
+        ),
+        UserFunction(
+            "ivo_healpix_center(hpxOrder INTEGER, hpxIndex BIGINT) -> POINT",
+            "The centre of the NESTED HEALPix cell hpxIndex of order hpxOrder.",
+        ),
+    ),
 )
 
 BACKENDS: dict[str, GeometryBackend] = {b.name: b for b in (PGSPHERE, SKYCELL)}
