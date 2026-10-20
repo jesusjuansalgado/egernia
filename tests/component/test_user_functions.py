@@ -4,13 +4,17 @@ skycell only: pg_sphere has none of them, and the capabilities declare none
 under it. The epoch propagation is checked against ERFA's ``pmsafe``, an
 independent implementation, on the fastest-moving star on the sky; the two
 differ by ERFA's light-time correction, which ESA SP-1200's rigorous
-propagation leaves out: 0.012 mas in position over these ten years.
+propagation leaves out: 0.012 mas in position over these ten years. The
+IVOA catalogue of ADQL user-defined functions (Endorsed Note 1.2) gives
+examples with answers; its NULL cases come from an uploaded table, ADQL
+having no NULL literal, as a catalogue's missing radial velocities would.
 """
 
 import json
 import math
 
 import httpx
+import psycopg
 import pytest
 from egernia_core.config import GEOMETRY_BACKENDS, _choose
 
@@ -140,3 +144,82 @@ def test_healpix_index_and_centre_are_inverse(tap_service):
         " ivo_healpix_index(10, ivo_healpix_center(10, 12345)) FROM ska.continuum_sources",
     )
     assert (index, centre_index) == (3, 12345)
+
+
+# The catalogue's ivo_epoch_prop_pos examples (EN 1.2, section "Astrometry"):
+# ra, dec, parallax, pmra, pmdec, radial_velocity, ref_epoch, out_epoch, and
+# the answer. None is a NULL cell; the last answer the catalogue itself calls
+# approximate ("the concrete small parallax has not been fixed normatively").
+_CATALOGUE = [
+    (
+        (7.606083572, 11.79044105, 125, 300, -428.8, 52.51, 2016.0, 1992.25),
+        (7.604061404627978, 11.7932703828279),
+    ),
+    (
+        (7.606083572, 11.79044105, 125, 300, -428.8, 52.51, 2016.0, 1875.0),
+        (7.594068213694308, 11.807251375203935),
+    ),
+    (
+        (7.606083572, 11.79044105, 125, 300, -428.8, None, 2016.0, 1875.0),
+        (7.594079587029898, 11.807235464326332),
+    ),
+    (
+        (7.606083572, 11.79044105, 125, 300, None, None, 2016.0, 1875.0),
+        (7.594080321498365, 11.790440798509207),
+    ),
+    (
+        (7.606083572, 11.79044105, None, 300, -428.8, 52.51, 2016.0, 1875.0),
+        (7.594079587020846, 11.807235464339055),
+    ),
+]
+_COLUMNS = ("ra", "dec", "plx", "pmra", "pmdec", "rv", "ep0", "ep1", "ra_want", "dec_want")
+
+
+def _upload(rows):
+    fields = '<FIELD name="n" datatype="int"/>' + "".join(
+        f'<FIELD name="{name}" datatype="double"/>' for name in _COLUMNS
+    )
+    body = "".join(
+        "<TR>"
+        + "".join("<TD/>" if v is None else f"<TD>{v!r}</TD>" for v in (n, *args, *want))
+        + "</TR>"
+        for n, (args, want) in enumerate(rows, 1)
+    )
+    return (
+        '<?xml version="1.0"?><VOTABLE version="1.4"'
+        ' xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE>'
+        f"{fields}<DATA><TABLEDATA>{body}</TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>"
+    ).encode()
+
+
+@pytest.fixture(scope="module")
+def skycell_version(database_url):
+    with psycopg.connect(database_url) as conn:
+        row = conn.execute("SELECT extversion FROM pg_extension WHERE extname = 'skycell'")
+        version = row.fetchone()
+    return tuple(int(part) for part in version[0].split(".")) if version else None
+
+
+def test_epoch_propagation_gives_the_ivoa_catalogue_answers(tap_service, skycell_version):
+    if skycell_version is None or skycell_version < (0, 32):
+        pytest.skip(
+            f"NULL arguments as the catalogue has them need skycell 0.32 (have {skycell_version})"
+        )
+    response = httpx.post(
+        f"{tap_service}/sync",
+        data={
+            "LANG": "ADQL",
+            "REQUEST": "doQuery",
+            "FORMAT": "json",
+            "UPLOAD": "ex,param:ex",
+            "QUERY": "SELECT n, 3600000000 * DISTANCE(ivo_epoch_prop_pos(u.ra, u.dec, u.plx,"
+            " u.pmra, u.pmdec, u.rv, u.ep0, u.ep1), POINT('ICRS', u.ra_want, u.dec_want))"
+            " AS off_uas FROM TAP_UPLOAD.ex AS u ORDER BY n",
+        },
+        files={"ex": ("ex.vot", _upload(_CATALOGUE), "application/x-votable+xml")},
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()["data"]
+    # every example answered (no NULL), within a micro-arcsecond
+    assert [n for n, _ in rows] == [1, 2, 3, 4, 5]
+    assert all(off is not None and off < 1 for _, off in rows), rows

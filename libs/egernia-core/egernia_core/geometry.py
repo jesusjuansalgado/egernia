@@ -132,47 +132,58 @@ SKYCELL = GeometryBackend(
     geometry_types=frozenset({"skypos", "skyregion"}),
     # COORD1, COORD2 and CENTROID pass through to skycell's own functions
     adql_geometry_forms=tuple(sorted((*_ADQL_GEOMETRY, "CENTROID", "COORD1", "COORD2"))),
-    # skycell's astrometry functions, under the names (and forms) of the IVOA
-    # catalogue of ADQL user-defined functions, as DaCHS declares them. Not
-    # declared: skycell's ivo_apply_pm -- DaCHS's is gavo_apply_pm, in
-    # degrees/yr, where skycell's takes mas/yr -- and skycell's frame
-    # conversions (icrs2gal and kin; the catalogue's is ivo_geom_transform).
+    # skycell's astrometry functions (0.32 or later for the NULL handling),
+    # with the IVOA catalogue of ADQL user-defined functions (EN 1.2) as the
+    # reference; where it has no entry, GAVO DaCHS's declaration is. Not
+    # declared: skycell's ivo_apply_pm (the catalogue dropped its ivo_apply_pm
+    # before 1.0; DaCHS's gavo_apply_pm takes degrees/yr, skycell's mas/yr)
+    # and its frame conversions (icrs2gal and kin; the catalogue's function
+    # for those is ivo_geom_transform).
     user_functions=(
-        UserFunction(
-            "ivo_epoch_prop(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
-            " parallax DOUBLE PRECISION, pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION,"
-            " radial_velocity DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
-            " out_epoch DOUBLE PRECISION) -> DOUBLE PRECISION[6]",
-            "The astrometric parameters propagated rigorously (ESA SP-1200, 1.5.5)"
-            " from ref_epoch to out_epoch: [ra, dec, parallax, pmra, pmdec,"
-            " radial_velocity]. Degrees, mas, mas/yr (pmra including cos(dec)),"
-            " km/s; epochs in Julian years.",
-        ),
         UserFunction(
             "ivo_epoch_prop_pos(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
             " parallax DOUBLE PRECISION, pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION,"
             " radial_velocity DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
             " out_epoch DOUBLE PRECISION) -> POINT",
-            "The position of ivo_epoch_prop, as a POINT.",
+            "The position at out_epoch of an object with these six parameters at"
+            " ref_epoch, propagated rigorously (ESA SP-1200, 1.5.5), as in the IVOA"
+            " catalogue of ADQL user-defined functions. Degrees, mas, mas/yr (pmra"
+            " including cos(dec)), km/s; epochs in Julian years. A NULL parallax is"
+            " infinitely remote, a NULL proper motion or radial velocity is 0, a"
+            " NULL position or epoch is an error.",
         ),
         UserFunction(
             "ivo_epoch_prop_pos(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
             " pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
             " out_epoch DOUBLE PRECISION) -> POINT",
-            "ivo_epoch_prop_pos without parallax and radial velocity: the proper"
-            " motion alone, along the great circle.",
+            "ivo_epoch_prop_pos as if parallax and radial_velocity were both NULL"
+            " (GAVO DaCHS's variant; not in the IVOA catalogue).",
         ),
         UserFunction(
-            "ivo_healpix_index(order INTEGER, ra DOUBLE PRECISION, dec DOUBLE PRECISION) -> BIGINT",
-            "The index of the NESTED HEALPix cell of order order containing (ra, dec).",
+            "ivo_epoch_prop(ra DOUBLE PRECISION, dec DOUBLE PRECISION,"
+            " parallax DOUBLE PRECISION, pmra DOUBLE PRECISION, pmdec DOUBLE PRECISION,"
+            " radial_velocity DOUBLE PRECISION, ref_epoch DOUBLE PRECISION,"
+            " out_epoch DOUBLE PRECISION) -> DOUBLE PRECISION[6]",
+            "All six parameters at out_epoch, [ra, dec, parallax, pmra, pmdec,"
+            " radial_velocity], in the units and with the NULL handling of"
+            " ivo_epoch_prop_pos; without a parallax, the parallax and radial"
+            " velocity at out_epoch are NULL (GAVO DaCHS's function; not in the IVOA"
+            " catalogue).",
         ),
         UserFunction(
-            "ivo_healpix_index(order INTEGER, p POINT) -> BIGINT",
-            "The index of the NESTED HEALPix cell of order order containing p.",
+            "ivo_healpix_index(hpxOrder INTEGER, long DOUBLE PRECISION,"
+            " lat DOUBLE PRECISION) -> BIGINT",
+            "The index of the HEALPix cell containing (long, lat), in degrees, at"
+            " order hpxOrder, in NESTED numbering.",
+        ),
+        UserFunction(
+            "ivo_healpix_index(hpxOrder INTEGER, point POINT) -> BIGINT",
+            "The index of the HEALPix cell containing point at order hpxOrder, in"
+            " NESTED numbering.",
         ),
         UserFunction(
             "ivo_healpix_center(hpxOrder INTEGER, hpxIndex BIGINT) -> POINT",
-            "The centre of the NESTED HEALPix cell hpxIndex of order hpxOrder.",
+            "The centre of the HEALPix cell hpxIndex at order hpxOrder, in NESTED numbering.",
         ),
     ),
 )

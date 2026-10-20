@@ -495,17 +495,21 @@ queries to fail one request at a time. `ivoa.obscore` rebuilds itself when
 its index definitions change.
 
 The `db` image installs pg_sphere always and skycell when built with a
-skycell release tag, commit or branch. Use skycell 0.31 or later: from 0.31
+skycell release tag, commit or branch. Use skycell 0.32 or later. From 0.31
 the cone scan tests cones on the position index's included `s_ra`/`s_dec`,
-which an earlier build ignores (it works, without that speed-up).
+which an earlier build ignores (it works, without that speed-up). From 0.32
+the epoch propagation functions take NULL arguments as the IVOA catalogue of
+ADQL user-defined functions says; with 0.31 a NULL parallax, proper motion or
+radial velocity makes the result NULL, so a propagated search drops every star
+without a measured radial velocity.
 
 ```bash
 # a release tag (or a commit): the build is reproducible, and the commit is
 # recorded in the image at /usr/share/skycell/COMMIT
-SKYCELL_REF=v0.31 TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
+SKYCELL_REF=v0.32 TAP_GEOMETRY_BACKEND=skycell docker compose up --build -d
 ```
 
-The extension's version is then `0.31` in `pg_available_extensions`.
+The extension's version is then `0.32` in `pg_available_extensions`.
 
 With Helm, set `config.geometryBackend: skycell` and use a tap-db image built
 with `SKYCELL_REF`.
@@ -529,14 +533,16 @@ What differs under skycell:
   a 32-gon, and a POSITION as a circle of 50 milliarcseconds.
 - `COORD1`, `COORD2` and `CENTROID` work, and the capabilities document lists
   them.
-- skycell's astrometry functions, under the names of the IVOA catalogue of
-  ADQL user-defined functions, are declared in the capabilities
-  (`features-udf`, with their units): `ivo_epoch_prop` and
-  `ivo_epoch_prop_pos` (rigorous epoch propagation, ESA SP-1200 1.5.5),
-  `ivo_healpix_index` and `ivo_healpix_center` (NESTED). A function that
-  returns a position is a POINT wherever ADQL takes one — in `CONTAINS`,
-  `INTERSECTS`, `DISTANCE` or as a `CIRCLE` centre — and `[ra, dec]` in the
-  select list. A propagated position cannot use the position index, so write
+- skycell's astrometry functions are declared in the capabilities
+  (`features-udf`, with their units): from the IVOA catalogue of ADQL
+  user-defined functions (Endorsed Note 1.2), `ivo_epoch_prop_pos` (rigorous
+  epoch propagation, ESA SP-1200 1.5.5), `ivo_healpix_index` and
+  `ivo_healpix_center` (NESTED); and GAVO DaCHS's `ivo_epoch_prop` (all six
+  parameters) and six-argument `ivo_epoch_prop_pos`. A NULL parallax, proper
+  motion or radial velocity is taken as the catalogue says (skycell 0.32).
+  A function that returns a position is a POINT wherever ADQL takes one — in
+  `CONTAINS`, `INTERSECTS`, `DISTANCE` or as a `CIRCLE` centre — and
+  `[ra, dec]` in the select list. A propagated position cannot use the position index, so write
   a proper-motion search as an indexed cone widened by the largest motion of
   interest, and the propagated test beside it:
 
